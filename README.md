@@ -54,4 +54,4 @@ The Ballroom holdout reads `Ballroom/Albums-Latin_Jam5-01.beats` from the refere
 
 ## Licensing
 
-The original Perception source is proprietary. Third-party material retains its own licenses. See [third-party notices](THIRD_PARTY_NOTICES.md).
+Perception's original source code is available under the [MIT License](LICENSE). Third-party materials and separately distributed model weights have their own terms. [Third-party notices](THIRD_PARTY_NOTICES.md)

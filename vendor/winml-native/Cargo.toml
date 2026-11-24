@@ -2,7 +2,7 @@
 name = "winml-native"
 version = "0.1.0"
 edition = "2024"
-license = "Proprietary"
+license = "MIT"
 publish = false
 description = "Safe Windows ML catalog and ONNX Runtime assignment facade"
 
