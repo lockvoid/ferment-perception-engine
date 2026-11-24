@@ -1,0 +1,190 @@
+{
+  "image_preprocessing": {
+    "destination_height": 19,
+    "destination_width": 19,
+    "normalization": "Float32(byte)/255, resize Float32, subtract mean, divide standard deviation, cast Float16",
+    "resize": "torchvision tensor bilinear, align_corners=false, antialias=true",
+    "source_height": 7,
+    "source_width": 31
+  },
+  "origin": {
+    "checkpoint_sha256": "ed2d4850b8792c239689b043c47046ec239b6e808a3d9b6ae676c803fd8780df",
+    "generator": "generate_swift_fixtures.py",
+    "generator_sha256": "32955a7ef80b06193232dbe428071ea0a1978d955f161fca43ad24dedb95e476",
+    "numpy_version": "1.26.4",
+    "torch_version": "2.7.0",
+    "torchvision_version": "0.22.0",
+    "upstream_commit": "7711e012a30a2402c4eaab637bdb00a521302c91"
+  },
+  "postprocessing": {
+    "display_height": 13,
+    "display_width": 19,
+    "low_height": 256,
+    "low_width": 256,
+    "minimum_absolute_reference_logit": 0.0013584933476522565,
+    "threshold": "strict_greater_than_zero"
+  },
+  "preprocessing_boundary": "video parity starts at orientation-corrected 1024x1024 RGB8; image parity starts at orientation-corrected opaque sRGB RGB8 before the pinned torchvision tensor resize",
+  "prompt": {
+    "normalized_box": [
+      [
+        0.125,
+        0.25
+      ],
+      [
+        0.875,
+        0.75
+      ]
+    ],
+    "normalized_points": [
+      [
+        0.5,
+        0.625
+      ],
+      [
+        1.0,
+        0.0
+      ]
+    ],
+    "point_labels": [
+      0,
+      1
+    ]
+  },
+  "schema_version": 1,
+  "tensors": {
+    "post_display_logits": {
+      "byte_count": 988,
+      "comparison": "maximum_4_float32_ulp",
+      "dtype": "<f4",
+      "layout": "height,width",
+      "path": "post_display_logits_fp32.bin",
+      "sha256": "5c19fcf915cbc7964a1c90c8b671ff400b9a0f81d5f04bb07aeddfe6229aa2ec",
+      "shape": [
+        13,
+        19
+      ]
+    },
+    "post_low_logits": {
+      "byte_count": 262144,
+      "comparison": "input_byte_exact",
+      "dtype": "<f4",
+      "layout": "height,width",
+      "path": "post_low_logits_fp32.bin",
+      "sha256": "e19ae49bdcde7ea414ef30674ec0bca79e98a617d870471e31e3d5e9ec5b3c5c",
+      "shape": [
+        256,
+        256
+      ]
+    },
+    "post_mask": {
+      "byte_count": 247,
+      "comparison": "byte_exact",
+      "dtype": "|u1",
+      "layout": "row_major_height,width",
+      "path": "post_mask_u8.bin",
+      "sha256": "9a0eaae9cfd3a26dba93b1923c1e630c476d1d8d574e477804c8d0204b4cbb70",
+      "shape": [
+        13,
+        19
+      ]
+    },
+    "post_rle_counts": {
+      "byte_count": 288,
+      "comparison": "byte_exact",
+      "dtype": "<i8",
+      "layout": "column_major_alternating_runs",
+      "path": "post_rle_counts_int64.bin",
+      "sha256": "dbe1ef564e10c28010d6f55e1acff35ea38734d39f52188f7ba0eb5c6ac3abdd",
+      "shape": [
+        36
+      ]
+    },
+    "pre_image_normalized": {
+      "byte_count": 2166,
+      "comparison": "byte_exact_fp16",
+      "dtype": "<f2",
+      "layout": "channel,height,width",
+      "path": "pre_image_normalized_fp16.bin",
+      "sha256": "5bd82ef3c3b77ff628af6b96af352e0a0d095c9dec7ce4f7cb24a5a98a38c452",
+      "shape": [
+        3,
+        19,
+        19
+      ]
+    },
+    "pre_image_resized_unit": {
+      "byte_count": 4332,
+      "comparison": "byte_exact_fp32",
+      "dtype": "<f4",
+      "layout": "channel,height,width",
+      "path": "pre_image_resized_unit_fp32.bin",
+      "sha256": "ed81ad10b3bd58c3a8425986c099d1e5f5787d10874884982c3ebe0789e8a379",
+      "shape": [
+        3,
+        19,
+        19
+      ]
+    },
+    "pre_image_rgb": {
+      "byte_count": 651,
+      "comparison": "byte_exact",
+      "dtype": "|u1",
+      "layout": "height,width,RGB",
+      "path": "pre_image_rgb_u8.bin",
+      "sha256": "f9873a6794e708fcdac7997cfbfd15571f93d3bfe3ed6d6733c352b486ee01e7",
+      "shape": [
+        7,
+        31,
+        3
+      ]
+    },
+    "pre_normalized_probe": {
+      "byte_count": 1536,
+      "comparison": "byte_exact_fp16",
+      "dtype": "<f2",
+      "layout": "channel,probe_pixel",
+      "path": "pre_normalized_probe_fp16.bin",
+      "sha256": "ba438a078861919bad0adaf71273458a1bb09a38919110130369dacd18062e33",
+      "shape": [
+        3,
+        256
+      ]
+    },
+    "pre_rgb_probe": {
+      "byte_count": 768,
+      "comparison": "byte_exact",
+      "dtype": "|u1",
+      "layout": "pixel,RGB",
+      "path": "pre_rgb_probe_u8.bin",
+      "sha256": "303c6e85f195894b32c62c4680a0991575b7ce0c22a561be36a9c990c294d09d",
+      "shape": [
+        256,
+        3
+      ]
+    },
+    "prompt_coordinates": {
+      "byte_count": 32,
+      "comparison": "byte_exact",
+      "dtype": "<f4",
+      "layout": "token,xy",
+      "path": "prompt_coordinates_fp32.bin",
+      "sha256": "ee1753c5231df6222fe733076bfd8f73bb6b80d72834abf52157ffb1ceeb7679",
+      "shape": [
+        4,
+        2
+      ]
+    },
+    "prompt_labels": {
+      "byte_count": 16,
+      "comparison": "byte_exact",
+      "dtype": "<i4",
+      "layout": "token",
+      "path": "prompt_labels_int32.bin",
+      "sha256": "15c7616300ad61f7e69d42c9283effdfd8caf19a9693567278d231f5e77d0395",
+      "shape": [
+        4
+      ]
+    }
+  }
+}

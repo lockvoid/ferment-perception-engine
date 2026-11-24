@@ -1,0 +1,19 @@
+{
+  "source": "https://api.ngc.nvidia.com/v2/models/nvidia/nemo/langid_ambernet/versions/1.12.0/files/ambernet.nemo",
+  "sha256": "2f92d645b9ea5824d7663584fecb9ecc52557d0d700e24266747f38a61ba1681",
+  "labels": 107,
+  "parity": {
+    "5 s window: logits nemo<->graph": 0.0015354156494140625,
+    "5 s window: logits graph<->onnx": 2.0265579223632812e-06,
+    "5 s window: embedding graph<->onnx": 3.337860107421875e-06,
+    "full 30 s window: logits nemo<->graph": 5.602836608886719e-06,
+    "full 30 s window: logits graph<->onnx": 3.427267074584961e-06,
+    "full 30 s window: embedding graph<->onnx": 3.814697265625e-06
+  },
+  "geometry": {
+    "window_samples": 480000,
+    "hop_length": 160,
+    "max_frames": 3000,
+    "padded_frames": 3008
+  }
+}

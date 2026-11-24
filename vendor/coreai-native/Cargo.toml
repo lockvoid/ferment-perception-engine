@@ -1,0 +1,13 @@
+[package]
+name = "coreai-native"
+version = "0.1.0"
+edition = "2024"
+license = "Proprietary"
+publish = false
+description = "Safe synchronous facade over Apple's public CoreAI Swift API"
+
+[lib]
+path = "src/lib.rs"
+
+[build-dependencies]
+bindgen = "=0.72.1"

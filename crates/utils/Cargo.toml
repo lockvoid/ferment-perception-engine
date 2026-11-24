@@ -1,0 +1,22 @@
+[package]
+name = "ferment-utils"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+# `rand` is not a workspace dependency yet — replicaman pins the same 0.9 line
+# for ULID/peer minting. Promote both to [workspace.dependencies] when that
+# track lands, so the two mints cannot drift onto different RNG versions.
+rand = "0.9"
+sha2.workspace = true
+
+[dev-dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true

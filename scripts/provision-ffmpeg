@@ -1,0 +1,790 @@
+#!/usr/bin/env bash
+# Provision the FFmpeg libav* shared libraries `ferment-engine-media` links
+# against, into the Tauri vendor path — the ONNX Runtime pattern, one script
+# for three targets.
+#
+#   scripts/provision-ffmpeg                      host target, from the CDN
+#   scripts/provision-ffmpeg x86_64-pc-windows-msvc
+#   scripts/provision-ffmpeg --build              build the host artifact from
+#                                                 the FFmpeg source tarball
+#   scripts/provision-ffmpeg --build --package    …and tar.zst it for the CDN
+#   scripts/provision-ffmpeg aarch64-linux-android --build
+#                                                 Android arm64, cross-built on
+#                                                 the host with the project's
+#                                                 NDK — no docker, no CDN
+#                                                 artifact published yet
+#
+# The libraries are LGPL-2.1-or-later, built --disable-gpl --disable-nonfree
+# and linked dynamically. `--enable-gpl` anywhere in this file is a review
+# failure: the shipped bundle would inherit the GPL.
+#
+# Layout after a run (gitignored, exactly like vendor/onnxruntime):
+#
+#   vendor/ffmpeg/<target>/lib/libav*.dylib|.so|.dll
+#   vendor/ffmpeg/<target>/include/libavcodec/...
+#   vendor/ffmpeg/host -> <host target>
+#
+# `.cargo/config.toml` points `FFMPEG_DIR` at that `host` entry, which is how
+# `ffmpeg-sys-next` finds both the headers (bindgen) and the link libraries.
+#
+# Overrides:
+#   FFMPEG_VERSION           pin a different FFmpeg release (default below)
+#   FFMPEG_BUILD             the artifact's build number (default below): the
+#                            same release compiled with a different whitelist
+#                            is a different artifact, and named as one
+#   FERMENT_FFMPEG_MIRROR    fetch from this base URL instead of the CDN.
+#                            `file:///abs/path` works — that is how the
+#                            download path is exercised before an artifact is
+#                            published.
+#   FFMPEG_SOURCE_DIR        --build: reuse an already-extracted source tree
+#   FERMENT_FFMPEG_VENDOR    provision into this directory instead of
+#                            vendor/ffmpeg
+#   ANDROID_NDK_HOME         the NDK the Android cross-build uses (required
+#                            for aarch64-linux-android; `source
+#                            ../ferment-cuts-android/scripts/env` sets it)
+#   ANDROID_API              NDK platform level for the Android build
+#                            (default below; must be <= the app's minSdk)
+
+set -euo pipefail
+
+# FFmpeg 8.1.2. The pin is set by two constraints, both checked rather than
+# assumed (see docs/fleet/2026-09-02_02_libav-media-backend_report.md):
+#   • `ffmpeg-sys-next` 9.0.0's build.rs emits the `ffmpeg_8_0`/`ffmpeg_8_1`
+#     cfgs at libavcodec 62.8/62.28, so an 8.x pin is what the bindings speak.
+#   • Ruling 3 asks for 8.0.x. 8.1.2 is the newest 8.x and the oldest one
+#     still carrying upstream security fixes; 8.0 is closed. Both satisfy the
+#     cfg test above, so the newer is pinned.
+VERSION="${FFMPEG_VERSION:-8.1.2}"
+
+# Which compile of that release. The CDN's objects are immutable — a year of
+# `max-age`, never rewritten — so a rebuild with a changed `configure_flags`
+# is a NEW artifact, `ffmpeg-$VERSION-$BUILD-<target>-…`, beside the old one,
+# never the old name with new bytes (an edge still serving the old tarball
+# against the new .sha256 is a digest mismatch on every machine). Bump it
+# with every change to the whitelist. The unnumbered 2026-09-02 set is build
+# 1; build 2 (2026-09-05) added the wav/aiff/caf demuxers and the alac decoder.
+# Build 3 adds FFV1, so a lossless live recording can be imported and replayed
+# through the same media decoder as every other saved video resource.
+# Build 4 adds AVI for exact CFR recording timestamps, including 60 and
+# 30000/1001 FPS; Matroska's millisecond clock cannot represent that grid.
+BUILD="${FFMPEG_BUILD:-5}"
+ARTIFACT="$VERSION-$BUILD"
+
+CDN_BASE="https://public.lockvoid.com/ferment/studio/vendor/ffmpeg"
+BASE="${FERMENT_FFMPEG_MIRROR:-$CDN_BASE/$VERSION}"
+
+SCRATCH=""
+cleanup() {
+    if [[ -n "$SCRATCH" ]]; then rm -rf "$SCRATCH"; fi
+}
+trap cleanup EXIT
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# The vendor root, overridable so a test can provision into a scratch
+# directory instead of the tree the running binary's rpath points at.
+VENDOR="${FERMENT_FFMPEG_VENDOR:-$ROOT/vendor/ffmpeg}"
+
+# The six libraries `ffmpeg-next`'s enabled features link, in dependency order.
+LIBS=(avutil swresample swscale avcodec avformat avfilter)
+
+# --------------------------------------------------------------------------
+# Provenance: every target is BUILT here, from the same pinned source tarball
+# and the same component whitelist.
+#
+# Ruling 4 named BtbN/FFmpeg-Builds as the source of the Windows and Linux
+# artifacts. Measured on 2026-09-02, their `*-lgpl-shared` build cannot carry
+# this track's licensing posture and is not used:
+#
+#   • It configures --enable-version3, so it is LGPL *3*, not the
+#     LGPL-2.1-or-later that ruling 6 puts in THIRD_PARTY_NOTICES.md.
+#   • It links ~40 further third-party libraries (libaom, dav1d, SVT-AV1,
+#     openh264, libass, libbluray, libjxl, librav1e, openal, SDL2, AMF,
+#     ffnvcodec …), each with its own notice and source-offer obligation.
+#   • It enables libssh/librist/libsrt — network protocol stacks ruling 16
+#     puts out of scope ("files only; no interrupt_callback").
+#   • 137 MB of DLLs against roughly 12 MB for the whitelist below.
+#
+# Ruling 3 already states a Windows configure line, which only has a use if we
+# build Windows ourselves — so that is what happens here. macOS builds
+# natively; Windows and Linux cross-build in a pinned container, because the
+# artifact must not depend on whose laptop made it.
+
+FFMPEG_SOURCE_URL="https://ffmpeg.org/releases/ffmpeg-$VERSION.tar.xz"
+FFMPEG_SOURCE_SHA256="464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c"
+
+# nv-codec-headers, for the Windows NVDEC/NVENC build. MIT licensed, and
+# FFmpeg 8.1's configure wants >= 12.1.14.0.
+NV_HEADERS_VERSION="n12.2.72.0"
+NV_HEADERS_URL="https://github.com/FFmpeg/nv-codec-headers/archive/refs/tags/$NV_HEADERS_VERSION.tar.gz"
+NV_HEADERS_SHA256="dbeaec433d93b850714760282f1d0992b1254fc3b5a6cb7d76fc1340a1e47563"
+
+CROSS_IMAGE="ferment-ffmpeg-cross:$VERSION"
+
+# --------------------------------------------------------------------------
+# Helpers
+
+host_target() {
+    case "$(uname -s)/$(uname -m)" in
+    Darwin/arm64) echo "aarch64-apple-darwin" ;;
+    Darwin/x86_64) echo "x86_64-apple-darwin" ;;
+    Linux/x86_64) echo "x86_64-unknown-linux-gnu" ;;
+    Linux/aarch64) echo "aarch64-unknown-linux-gnu" ;;
+    MINGW* | MSYS* | CYGWIN*) echo "x86_64-pc-windows-msvc" ;;
+    *)
+        echo "provision-ffmpeg: unsupported host $(uname -s)/$(uname -m)" >&2
+        exit 1
+        ;;
+    esac
+}
+
+# The NDK platform level the Android libraries are linked against. 33, not
+# cargo-ndk's default of 21: it is this project's minSdk, and the engine's
+# cdylib is linked at the same level.
+ANDROID_API="${ANDROID_API:-33}"
+
+# The NDK's clang/llvm toolchain directory. Every Android tool below comes out
+# of exactly this one prebuilt, so the artifact cannot be half one NDK and half
+# another.
+ndk_bin() {
+    # Not `${ANDROID_NDK_HOME:?…}`: a fatal expansion error loses its status to
+    # the EXIT trap on bash 3.2 (macOS), and the script exits 0 having built
+    # nothing. An explicit exit survives.
+    [[ -n "${ANDROID_NDK_HOME:-}" ]] || {
+        echo "provision-ffmpeg: ANDROID_NDK_HOME is required for an Android target (source ../ferment-cuts-android/scripts/env)" >&2
+        exit 1
+    }
+    local prebuilt
+    case "$(uname -s)/$(uname -m)" in
+    Darwin/*) prebuilt="darwin-x86_64" ;;
+    Linux/x86_64) prebuilt="linux-x86_64" ;;
+    *)
+        echo "provision-ffmpeg: no NDK prebuilt toolchain for $(uname -s)/$(uname -m)" >&2
+        exit 1
+        ;;
+    esac
+    local bin="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$prebuilt/bin"
+    # The API-level wrapper, not bare clang: that wrapper IS --cc below, and an
+    # ANDROID_API the NDK has no wrapper for otherwise fails thirty lines into
+    # configure as "C compiler test failed".
+    [[ -x "$bin/aarch64-linux-android$ANDROID_API-clang" ]] || {
+        echo "provision-ffmpeg: NDK at $bin has no API $ANDROID_API compiler" >&2
+        exit 1
+    }
+    echo "$bin"
+}
+
+sha256_of() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | cut -d' ' -f1
+    else
+        sha256sum "$1" | cut -d' ' -f1
+    fi
+}
+
+fetch() {
+    # curl handles file:// as well as https://, so a local mirror needs no
+    # second code path — which is the point: the download step under test is
+    # the same one that runs against the CDN.
+    curl -fsSL --retry 3 --retry-delay 2 -o "$2" "$1"
+}
+
+# `host` names the target this machine builds and runs against. A symlink on
+# mac/linux; a copied tree on Windows, where symlinks need a privilege the
+# build box does not have.
+link_host() {
+    local target="$1"
+    rm -rf "$VENDOR/host"
+    case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*) cp -R "$VENDOR/$target" "$VENDOR/host" ;;
+    *) ln -s "$target" "$VENDOR/host" ;;
+    esac
+}
+
+# Every provisioned tree must be able to answer the two questions
+# `ffmpeg-sys-next` asks: where are the headers, where are the link libraries.
+verify_tree() {
+    local target="$1"
+    local dir="$VENDOR/$target"
+    local missing=()
+    [[ -f "$dir/include/libavcodec/avcodec.h" ]] || missing+=("include/libavcodec/avcodec.h")
+    for lib in "${LIBS[@]}"; do
+        # macOS .dylib, Linux .so, Windows import .lib + runtime .dll in bin/.
+        compgen -G "$dir/lib/lib$lib.*" >/dev/null ||
+            compgen -G "$dir/lib/$lib.lib" >/dev/null ||
+            missing+=("lib/$lib")
+    done
+    if ((${#missing[@]})); then
+        echo "provision-ffmpeg: $target is incomplete — missing ${missing[*]}" >&2
+        exit 1
+    fi
+    local version build
+    [[ -f "$dir/BUILD" ]] || {
+        echo "provision-ffmpeg: $target has no BUILD receipt — rebuild or obtain the current $ARTIFACT artifact" >&2
+        exit 1
+    }
+    build="$(cat "$dir/BUILD")"
+    [[ "$build" == "$ARTIFACT" ]] || {
+        echo "provision-ffmpeg: $target is build $build, expected $ARTIFACT" >&2
+        exit 1
+    }
+    version="$(sed -n 's/^#define LIBAVCODEC_VERSION_MAJOR *//p' "$dir/include/libavcodec/version_major.h" 2>/dev/null | head -1)"
+    echo "provision-ffmpeg: $target ready (build $build, libavcodec major $version, $(du -sh "$dir" | cut -f1))"
+}
+
+# --------------------------------------------------------------------------
+# The dependency gate.
+#
+# `--disable-autodetect` stops configure from linking what it stumbles over,
+# but it is a promise about the build, not a fact about the bytes. This checks
+# the bytes. It runs after every build AND after every download, because an
+# artifact fetched from the CDN is exactly as capable of naming
+# /opt/homebrew/... as one built here — and that dependency does not fail at
+# link time or at `cargo test` time on the machine that made it. It fails on a
+# user's machine, at first import, with a dyld abort.
+
+# One line per allowed prefix. Anything a library names that is not on its
+# platform's list fails the build.
+assert_dependencies() {
+    local target="$1"
+    local dir="$VENDOR/$target"
+    case "$target" in
+    *-apple-darwin) assert_macos_dependencies "$dir" ;;
+    *-linux-android) assert_android_dependencies "$dir" ;;
+    *) assert_cross_dependencies "$target" "$dir" ;;
+    esac
+}
+
+# `@rpath/` is our own sibling libraries; the two system prefixes are what
+# every macOS binary is allowed to assume exists. A Homebrew, MacPorts or
+# /usr/local path is the failure this exists to catch.
+assert_macos_dependencies() {
+    local dir="$1" library offender
+    command -v otool >/dev/null 2>&1 || {
+        echo "provision-ffmpeg: otool is required to verify the artifact" >&2
+        exit 1
+    }
+    for library in "$dir"/lib/lib*.dylib; do
+        [[ -L "$library" ]] && continue
+        offender="$(
+            otool -L "$library" | tail -n +2 | awk '{print $1}' |
+                grep -v -e '^@rpath/' -e '^/System/Library/' -e '^/usr/lib/' || true
+        )"
+        if [[ -n "$offender" ]]; then
+            echo "provision-ffmpeg: $(basename "$library") links outside the system:" >&2
+            printf '  %s\n' $offender >&2
+            echo "  (configure auto-detected a library on the build box — see --disable-autodetect)" >&2
+            exit 1
+        fi
+    done
+    echo "provision-ffmpeg: dependency gate passed — @rpath, /System/Library, /usr/lib only"
+}
+
+# Android is inspected with the NDK's own llvm-readelf, not in a container: the
+# toolchain that built the libraries is already on this machine, and a docker
+# hop would only add a second readelf to disagree with.
+#
+# The allowed set is the Bionic floor every Android process already has, plus
+# our own six. Anything else — libmediandk, libcamera2ndk, libandroid, liblog —
+# would mean a platform codec or a JNI logger entered the component whitelist,
+# and MediaCodec/JNI is E1's decision, not this build's.
+#
+# configure's `android` case installs UNVERSIONED sonames and no symlinks
+# (SLIB_INSTALL_NAME='$(SLIBNAME)', SLIB_INSTALL_LINKS=), so all six are real
+# files. `inspected` holds that to be true: a versioned tree, or a macOS tree
+# dropped into this slot, matches no `lib*.so` and would otherwise be reported
+# as a pass having read nothing at all.
+assert_android_dependencies() {
+    local dir="$1" library offender readelf inspected=0
+    readelf="$(ndk_bin)/llvm-readelf"
+    local allowed="libc|libm|libdl|libz|libav(codec|format|util|filter)|libsw(scale|resample)"
+    for library in "$dir"/lib/lib*.so; do
+        # An unmatched glob comes through as its own literal pattern.
+        [[ -f "$library" ]] || continue
+        [[ -L "$library" ]] && continue
+        inspected=$((inspected + 1))
+        offender="$(
+            "$readelf" -d "$library" | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p' |
+                grep -vE "^($allowed)\.so" || true
+        )"
+        if [[ -n "$offender" ]]; then
+            echo "provision-ffmpeg: $(basename "$library") needs a non-system library:" >&2
+            printf '  %s\n' $offender >&2
+            exit 1
+        fi
+    done
+    ((inspected >= ${#LIBS[@]})) || {
+        echo "provision-ffmpeg: the gate read $inspected libraries, expected ${#LIBS[@]} — $dir/lib holds no unversioned lib*.so" >&2
+        exit 1
+    }
+    echo "provision-ffmpeg: dependency gate passed — Bionic and our own libraries only ($inspected libraries)"
+}
+
+# Windows and Linux are inspected in the same container that built them,
+# because `objdump` and `readelf` for those targets are not on a Mac.
+assert_cross_dependencies() {
+    local target="$1" dir="$2"
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "provision-ffmpeg: SKIP dependency gate for $target (docker is absent)"
+        return
+    fi
+    docker build -q -t "$CROSS_IMAGE-inspect" - >/dev/null <<'EOF'
+FROM debian:trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  binutils binutils-mingw-w64-x86-64 && rm -rf /var/lib/apt/lists/*
+EOF
+    docker run --rm -v "$dir:/v:ro" -e "TARGET=$target" "$CROSS_IMAGE-inspect" bash -c '
+        set -euo pipefail
+        case "$TARGET" in
+        *-windows-*)
+            # Loaded-at-runtime DLLs (d3d11, the Media Foundation set) do not
+            # appear here: FFmpeg resolves those with LoadLibrary, which is why
+            # the import table is this short.
+            allowed="KERNEL32|msvcrt|USER32|ADVAPI32|ole32|OLEAUT32|SHELL32|WS2_32|Secur32|CRYPT32|ncrypt|bcrypt|d3d11|dxgi|mf[a-z]*|mfplat|mfuuid|av(codec|format|util|filter)-[0-9]+|sw(scale|resample)-[0-9]+"
+            for f in /v/bin/*.dll; do
+                bad="$(x86_64-w64-mingw32-objdump -p "$f" | sed -n "s/^\s*DLL Name: //p" |
+                       grep -viE "^($allowed)\.dll$" || true)"
+                if [ -n "$bad" ]; then
+                    echo "$(basename "$f") imports a non-system DLL:" >&2
+                    echo "$bad" >&2
+                    exit 1
+                fi
+            done
+            ;;
+        *)
+            allowed="libc|libm|libpthread|libdl|librt|libz|libatomic|libav(codec|format|util|filter)|libsw(scale|resample)"
+            for f in /v/lib/*.so.*; do
+                [ -L "$f" ] && continue
+                bad="$(readelf -d "$f" | sed -n "s/.*NEEDED.*\[\(.*\)\]/\1/p" |
+                       grep -vE "^($allowed)\.so" || true)"
+                if [ -n "$bad" ]; then
+                    echo "$(basename "$f") needs a non-system library:" >&2
+                    echo "$bad" >&2
+                    exit 1
+                fi
+            done
+            ;;
+        esac' || {
+        echo "provision-ffmpeg: $target links outside the system — see above" >&2
+        exit 1
+    }
+    echo "provision-ffmpeg: dependency gate passed — system libraries only"
+}
+
+# --------------------------------------------------------------------------
+# Download path — the normal one, on every dev box and every CI runner.
+
+download() {
+    local target="$1"
+    local name="ffmpeg-$ARTIFACT-$target-lgpl-shared.tar.zst"
+    local tmp
+    tmp="$(mktemp -d)"
+    SCRATCH="$tmp"
+
+    echo "provision-ffmpeg: fetching $BASE/$name"
+    fetch "$BASE/$name" "$tmp/$name"
+    fetch "$BASE/$name.sha256" "$tmp/$name.sha256"
+
+    local want got
+    want="$(cut -d' ' -f1 <"$tmp/$name.sha256")"
+    got="$(sha256_of "$tmp/$name")"
+    if [[ "$want" != "$got" ]]; then
+        echo "provision-ffmpeg: digest mismatch for $name" >&2
+        echo "  published $want" >&2
+        echo "  fetched   $got" >&2
+        exit 1
+    fi
+
+    rm -rf "$VENDOR/${target:?}"
+    mkdir -p "$VENDOR/$target"
+    # --strip-components=1: the archive's root is the target name, and the
+    # vendor directory already is it.
+    tar --use-compress-program=unzstd -xf "$tmp/$name" -C "$VENDOR/$target" --strip-components=1
+    # The archive carries its own build stamp; a mirror serving the wrong
+    # build under the right name is caught here, not at first import.
+    if [[ -f "$VENDOR/$target/BUILD" ]] && [[ "$(cat "$VENDOR/$target/BUILD")" != "$ARTIFACT" ]]; then
+        echo "provision-ffmpeg: $name unpacked as build $(cat "$VENDOR/$target/BUILD"), not $ARTIFACT" >&2
+        exit 1
+    fi
+    verify_tree "$target"
+    assert_dependencies "$target"
+}
+
+# --------------------------------------------------------------------------
+# Build path — how every artifact is MADE. Ruling 3's configure line, and the
+# only place it exists.
+
+configure_flags() {
+    # Shared by every target. Component whitelist first, so a codec that is
+    # not on it cannot enter the shipped binary by way of a default.
+    local flags=(
+        --enable-shared --disable-static
+        --disable-gpl --disable-nonfree
+        --disable-programs --disable-doc --disable-avdevice
+        --disable-everything
+        # Without this, configure links whatever it finds on the BUILD box.
+        # It found Homebrew's libX11 and put /opt/homebrew/... into all six
+        # macOS dylibs — an artifact that only loads on the machine that made
+        # it. Nothing is linked unless it is named below.
+        --disable-autodetect
+        # Compressed container headers: Matroska's zlib track compression and
+        # MOV's `cmvd`. Both are system libraries on every target we ship.
+        --enable-zlib
+        # NOT image2 — deliberately, and it is the app that decides this:
+        # `probe_import` reaches its dedicated still reader ONLY when the
+        # container probe FAILS, so a libavformat that opens a PNG would
+        # reclassify a still import as `video`.
+        #
+        # wav, aiff and caf ARE here since 2026-09-05. They were left out for
+        # the same reason (a libavformat that opens a WAVE renames the probe's
+        # codec from `lpcm` to `pcm_s16le`), on the assumption that every
+        # WAVE consumer took `hound`'s fast path — which the audio engine
+        # takes on the file's EXTENSION, and a blob in the store has none
+        # (`pmck/Element/<id>/original`). A kit whose pad samples are WAVs
+        # therefore reached libavformat and found no demuxer, and one pad the
+        # engine could not open cost the whole project (redshift `_10`'s
+        # finding 8). The probe keeps its `lpcm` vocabulary on its own side.
+        --enable-demuxer=nut,mov,matroska,avi,webm_dash_manifest,mp3,aac,flac,ogg,wav,aiff,caf
+        # `MuxFormat` is Mp4 or Mov; there is no WAVE output to write.
+        --enable-muxer=mov,mp4,ipod
+        # `alac` rides in with `caf`: an Apple recorder's CAF is as often ALAC as
+        # it is PCM, and a demuxer that opens a container whose codec it cannot
+        # decode is a worse answer than no demuxer.
+        --enable-decoder=h264,hevc,prores,ffv1,rawvideo,vp8,vp9,av1,mjpeg,aac,mp3,flac,vorbis,opus,alac,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_s32be,pcm_f32le,pcm_f32be,pcm_u8,pcm_s8,pcm_alaw,pcm_mulaw
+        --enable-filter=scale,format,tonemap,yadif,aresample,aformat,anull,null
+        --enable-parser=h264,hevc,aac,aac_latm,mpegaudio,flac,vorbis,opus,vp8,vp9,av1,mjpeg
+        --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,aac_adtstoasc,extract_extradata,vp9_superframe
+        --enable-protocol=file
+    )
+    case "$1" in
+    *-apple-darwin)
+        flags+=(
+            --enable-videotoolbox --enable-audiotoolbox
+            --enable-bzlib
+            --install-name-dir=@rpath
+            --enable-encoder=h264_videotoolbox,hevc_videotoolbox,prores_videotoolbox,aac_at,aac,pcm_s16le
+            # av1_videotoolbox is NOT decoration: libavcodec's own `av1`
+            # decoder is hwaccel-only (no software path without dav1d, which
+            # ruling 3 does not enable), so without this hwaccel an AV1 file
+            # cannot be decoded at all rather than merely decoded slowly.
+            --enable-hwaccel=h264_videotoolbox,hevc_videotoolbox,prores_videotoolbox,vp9_videotoolbox,av1_videotoolbox
+        )
+        ;;
+    *-windows-*)
+        flags+=(
+            --enable-mediafoundation --enable-d3d11va
+            # NVDEC/NVENC. The shipping Windows target is NVIDIA, and
+            # `libavcodec/nvdec.c` pipelines properly where the VideoToolbox
+            # hwaccel does not. Neither needs `--enable-nonfree`: configure
+            # asks only for `ffnvcodec` (MIT headers) and dlopen, so the LGPL
+            # posture is unchanged and no NVIDIA library is linked or shipped.
+            # D3D11VA stays as the answer on an Intel or AMD machine.
+            --enable-ffnvcodec --enable-cuvid --enable-nvdec --enable-nvenc
+            --enable-encoder=h264_nvenc,hevc_nvenc,av1_nvenc,h264_mf,hevc_mf,aac_mf,prores_ks,aac,pcm_s16le
+            # The standalone CUVID decoders alongside the nvdec hwaccels: the
+            # hwaccels are the integrated path, these are the fallback when a
+            # driver offers one and not the other.
+            --enable-decoder=h264_cuvid,hevc_cuvid,vp9_cuvid,av1_cuvid
+            # Both spellings of each: upstream gates the implementing object
+            # (dxva2_h264.o …) on the NON-"2" config, so enabling only the "2"
+            # variant links a decoder that references a hwaccel nobody built.
+            --enable-hwaccel=h264_nvdec,hevc_nvdec,vp9_nvdec,av1_nvdec,h264_d3d11va,h264_d3d11va2,hevc_d3d11va,hevc_d3d11va2,vp9_d3d11va,vp9_d3d11va2,av1_d3d11va,av1_d3d11va2
+        )
+        ;;
+    *-linux-android)
+        # Same headers, no platform codec — the Linux posture, for the same
+        # reason: MediaCodec/JNI hwaccel is E1's ruling and would drag
+        # libmediandk into the dependency gate. `--enable-jni` is deliberately
+        # absent.
+        #
+        # Every tool is the NDK's, addressed through the API-level wrapper, so
+        # the sysroot and the target triple come from the wrapper rather than
+        # from --sysroot/--extra-cflags we would have to keep in step.
+        local bin
+        bin="$(ndk_bin)"
+        flags+=(
+            --enable-encoder=aac,pcm_s16le
+            --enable-cross-compile
+            --target-os=android
+            --arch=aarch64
+            --cc="$bin/aarch64-linux-android$ANDROID_API-clang"
+            --ar="$bin/llvm-ar"
+            --nm="$bin/llvm-nm"
+            --ranlib="$bin/llvm-ranlib"
+            --strip="$bin/llvm-strip"
+        )
+        ;;
+    *)
+        # Linux is the CI compile target only: same headers, no platform codec.
+        flags+=(--enable-encoder=aac,pcm_s16le)
+        ;;
+    esac
+    printf '%s\n' "${flags[@]}"
+}
+
+# The pinned source tree, verified by digest. `--build` is the only caller.
+source_tree() {
+    if [[ -n "${FFMPEG_SOURCE_DIR:-}" ]]; then
+        echo "$FFMPEG_SOURCE_DIR"
+        return
+    fi
+    local cache="$ROOT/tmp/ffmpeg-src"
+    mkdir -p "$cache"
+    local tarball="$cache/ffmpeg-$VERSION.tar.xz"
+    if [[ ! -f "$tarball" ]]; then
+        echo "provision-ffmpeg: fetching $FFMPEG_SOURCE_URL" >&2
+        fetch "$FFMPEG_SOURCE_URL" "$tarball"
+    fi
+    local got
+    got="$(sha256_of "$tarball")"
+    if [[ "$got" != "$FFMPEG_SOURCE_SHA256" ]]; then
+        echo "provision-ffmpeg: FFmpeg source digest mismatch" >&2
+        echo "  pinned  $FFMPEG_SOURCE_SHA256" >&2
+        echo "  fetched $got" >&2
+        exit 1
+    fi
+    [[ -d "$cache/ffmpeg-$VERSION" ]] || tar xf "$tarball" -C "$cache"
+    echo "$cache/ffmpeg-$VERSION"
+}
+
+# macOS dylibs install as `@rpath/libavcodec.62.dylib`, so THAT name has to be
+# the real file in `Contents/Frameworks` — Tauri copies each framework entry by
+# basename, and a bundled symlink would point at a `.62.28.102.` sibling the
+# bundle does not carry. Collapse the three-name chain to one real file plus
+# the unversioned symlink the linker resolves `-lavcodec` through.
+flatten_dylibs() {
+    local dir="$1/lib" lib real major
+    for lib in "${LIBS[@]}"; do
+        real="$(ls "$dir/lib$lib".*.*.*.dylib 2>/dev/null | head -1)" || true
+        [[ -n "$real" ]] || continue
+        major="$(basename "$real" | sed -E "s/^lib$lib\.([0-9]+)\..*/\1/")"
+        rm -f "$dir/lib$lib.$major.dylib"
+        mv "$real" "$dir/lib$lib.$major.dylib"
+        ln -sf "lib$lib.$major.dylib" "$dir/lib$lib.dylib"
+    done
+}
+
+# MSVC links against an import library, and rustc resolves `-lavcodec` out of
+# `$FFMPEG_DIR/lib`. A mingw cross-build already MAKES those `.lib` files —
+# FFmpeg runs `dlltool` itself — but installs them beside the DLLs in `bin/`,
+# where nothing looks for them. Move, do not copy: two copies of an import
+# library is how a stale one gets linked.
+windows_import_libs() {
+    local dir="$1" lib
+    for lib in "${LIBS[@]}"; do
+        if [[ -f "$dir/bin/$lib.lib" ]]; then
+            mv "$dir/bin/$lib.lib" "$dir/lib/$lib.lib"
+        fi
+    done
+    # The `.def` files were dlltool's input and the `.dll.a` archives are the
+    # GNU-toolchain equivalent of the `.lib` files. Neither is linked by an
+    # MSVC build, and both are pure weight in the artifact.
+    rm -f "$dir/lib"/*.def "$dir/lib"/*.dll.a
+}
+
+configure_and_make() {
+    local target="$1" source="$2" prefix="$3"
+    local flags=()
+    while IFS= read -r flag; do flags+=("$flag"); done < <(configure_flags "$target")
+    # A process substitution swallows its own exit status: if configure_flags
+    # died, the loop reads nothing and ./configure would run bare — autodetect
+    # on, host target, installed under the cross target's name.
+    ((${#flags[@]})) || {
+        echo "provision-ffmpeg: configure_flags produced no flags for $target" >&2
+        exit 1
+    }
+    cd "$source"
+    make distclean >/dev/null 2>&1 || true
+    ./configure --prefix="$prefix" "${flags[@]}"
+    # configure's own license verdict IS the gate: a --enable-gpl that crept
+    # in anywhere would make the shipped bundle inherit the GPL.
+    if grep -q '^CONFIG_GPL=yes' ffbuild/config.mak ||
+        grep -q '^CONFIG_NONFREE=yes' ffbuild/config.mak; then
+        echo "provision-ffmpeg: refusing a GPL/nonfree build" >&2
+        exit 1
+    fi
+    make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu)"
+    make install
+}
+
+# Windows and Linux build in a container so the artifact does not depend on
+# whose machine made it. The image is built once and cached by Docker.
+cross_build() {
+    local target="$1" source="$2" prefix="$3"
+    # zlib for both: `--disable-autodetect` means an absent header is a
+    # SILENT loss of Matroska header decompression, not a build failure.
+    local packages="build-essential nasm yasm pkg-config xz-utils zlib1g-dev curl ca-certificates"
+    # Extra image setup, per target. Empty for Linux.
+    local stanza=""
+    local flags=()
+    while IFS= read -r flag; do flags+=("$flag"); done < <(configure_flags "$target")
+    local platform=()
+    case "$target" in
+    x86_64-*-linux-*) platform=(--platform linux/amd64) ;;
+    esac
+    case "$target" in
+    *-windows-*)
+        packages="$packages mingw-w64 llvm libz-mingw-w64-dev"
+        # Two things the Windows image needs, as one Docker layer.
+        #
+        # Windows has no system zlib, and Debian's mingw package ships both a
+        # static archive and an import library for a `zlib1.dll` we do not
+        # bundle; configure prefers the import library, so removing it leaves
+        # the static archive as the only candidate. The dependency gate caught
+        # this the first time round. THIRD_PARTY_NOTICES.md credits zlib.
+        #
+        # nv-codec-headers is the MIT header set NVDEC/NVENC compile against,
+        # pinned and digest-checked. Nothing from NVIDIA is linked into or
+        # shipped with the libraries — FFmpeg dlopens the driver at run time.
+        stanza="RUN rm -f /usr/x86_64-w64-mingw32/lib/libz.dll.a"
+        stanza="$stanza && curl -fsSL -o /tmp/nvh.tar.gz $NV_HEADERS_URL"
+        stanza="$stanza && echo '$NV_HEADERS_SHA256  /tmp/nvh.tar.gz' | sha256sum -c -"
+        stanza="$stanza && tar xzf /tmp/nvh.tar.gz -C /tmp"
+        stanza="$stanza && make -C /tmp/nv-codec-headers-$NV_HEADERS_VERSION"
+        stanza="$stanza PREFIX=/usr/x86_64-w64-mingw32 install"
+        # FFmpeg's configure looks for a pkg-config named with the cross
+        # prefix, and SILENTLY disables every pkg-config check when it is
+        # absent — which is how the first NVDEC build failed with "not all
+        # dependencies are satisfied: ffnvcodec" while the .pc file sat right
+        # there. PKG_CONFIG_LIBDIR rather than PKG_CONFIG_PATH, so the wrapper
+        # sees the cross prefix and nothing else: a host library must never
+        # satisfy a Windows build.
+        stanza="$stanza"$'\n'"RUN printf '%s\\n' '#!/bin/sh' 'export PKG_CONFIG_LIBDIR=/usr/x86_64-w64-mingw32/lib/pkgconfig' 'exec pkg-config \"\$@\"' > /usr/bin/x86_64-w64-mingw32-pkg-config && chmod +x /usr/bin/x86_64-w64-mingw32-pkg-config"
+        flags+=(
+            --enable-cross-compile --cross-prefix=x86_64-w64-mingw32-
+            --arch=x86_64 --target-os=mingw32
+        )
+        ;;
+    esac
+
+    docker build ${platform[@]+"${platform[@]}"} -q -t "$CROSS_IMAGE-$target" - >/dev/null <<EOF
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends $packages \\
+  && rm -rf /var/lib/apt/lists/*
+$stanza
+EOF
+
+    # The source is mounted read-only and copied in: configure writes into the
+    # tree, and a cross build must not leave its config behind for the next one.
+    docker run --rm ${platform[@]+"${platform[@]}"} -v "$source:/src:ro" -v "$prefix:/out" "$CROSS_IMAGE-$target" \
+        bash -c '
+            set -euo pipefail
+            cp -a /src /build && cd /build
+            make distclean >/dev/null 2>&1 || true
+            ./configure --prefix=/out "$@"
+            if grep -qE "^CONFIG_(GPL|NONFREE)=yes" ffbuild/config.mak; then
+                echo "provision-ffmpeg: refusing a GPL/nonfree build" >&2
+                exit 1
+            fi
+            make -j"$(nproc)"
+            make install
+        ' _ "${flags[@]}"
+}
+
+build() {
+    local target="$1" package="$2"
+    local prefix="$VENDOR/${target:?}"
+    local source
+    source="$(source_tree)"
+
+    rm -rf "$prefix"
+    mkdir -p "$prefix"
+
+    echo "provision-ffmpeg: configuring FFmpeg $VERSION (build $BUILD) for $target"
+    local host
+    host="$(host_target)"
+    case "$target" in
+    "$host")
+        (configure_and_make "$target" "$source" "$prefix")
+        ;;
+    *-linux-android)
+        # No container: the NDK is a cross toolchain that runs natively on this
+        # machine, and configure's own `android` case already produces the
+        # UNVERSIONED sonames Android's loader requires. The artifact therefore
+        # depends on the NDK version, which is pinned by
+        # ../ferment-cuts-android/scripts/env — recorded, not hidden.
+        ndk_bin >/dev/null # fails loudly here rather than inside configure
+        echo "provision-ffmpeg: NDK $(basename "$ANDROID_NDK_HOME"), API $ANDROID_API"
+        (configure_and_make "$target" "$source" "$prefix")
+        ;;
+    *)
+        cross_build "$target" "$source" "$prefix"
+        ;;
+    esac
+
+    # The .pc files and the docs are not part of what we ship.
+    rm -rf "$prefix/share" "$prefix/lib/pkgconfig"
+    case "$target" in
+    *-apple-darwin) flatten_dylibs "$prefix" ;;
+    *-windows-*) windows_import_libs "$prefix" ;;
+    esac
+    # The stamp `download` checks: which build these bytes are.
+    printf '%s\n' "$ARTIFACT" >"$prefix/BUILD"
+    verify_tree "$target"
+    assert_dependencies "$target"
+
+    if [[ "$package" == "yes" ]]; then
+        package_artifact "$target"
+    fi
+}
+
+# --------------------------------------------------------------------------
+# Packaging — the exact bytes `scripts/ffmpeg-publish` uploads.
+
+package_artifact() {
+    local target="$1"
+    local out="$ROOT/dist/ffmpeg-publish/$VERSION"
+    local name="ffmpeg-$ARTIFACT-$target-lgpl-shared.tar.zst"
+    mkdir -p "$out"
+    # The archive root is the target name, which is what `download`'s
+    # --strip-components=1 peels back off.
+    tar --use-compress-program='zstd -19' -cf "$out/$name" -C "$VENDOR" "$target"
+    (cd "$out" && sha256_of "$name" | awk -v n="$name" '{print $1 "  " n}' >"$name.sha256")
+    echo "provision-ffmpeg: packaged $out/$name ($(du -h "$out/$name" | cut -f1))"
+    cat "$out/$name.sha256"
+}
+
+# --------------------------------------------------------------------------
+
+main() {
+    local do_build=no package=no target=""
+    while (($#)); do
+        case "$1" in
+        --build) do_build=yes ;;
+        --package) package=yes ;;
+        -h | --help)
+            sed -n '2,/^$/p' "${BASH_SOURCE[0]}"
+            exit 0
+            ;;
+        -*)
+            echo "provision-ffmpeg: unknown flag $1" >&2
+            exit 1
+            ;;
+        *) target="$1" ;;
+        esac
+        shift
+    done
+    [[ -n "$target" ]] || target="$(host_target)"
+
+    mkdir -p "$VENDOR"
+    # The shell's own name for it, as for ROOT: globs and GNU tar's
+    # extraction -C read a backslash as an escape, and a Windows-form
+    # FERMENT_FFMPEG_VENDOR (`C:\…`) is full of them.
+    VENDOR="$(cd "$VENDOR" && pwd -P)"
+    if [[ "$do_build" == "yes" ]]; then
+        build "$target" "$package"
+    else
+        download "$target"
+    fi
+
+    # Only the host target can back a local build; a cross-provisioned target
+    # is headers-and-import-libs for `cargo check --target`, nothing more.
+    if [[ "$target" == "$(host_target)" ]]; then
+        link_host "$target"
+        echo "provision-ffmpeg: FFMPEG_DIR -> vendor/ffmpeg/host -> $target"
+    fi
+    # An `if` whose condition is false returns 1, and that would be `main`'s —
+    # and the script's — exit status for every cross target.
+    return 0
+}
+
+main "$@"

@@ -1,0 +1,11 @@
+{
+  "release": "https://github.com/notofonts/latin-greek-cyrillic/releases/tag/NotoSans-v2.015",
+  "archive_sha256": "0c34df072a3fa7efbb7cbf34950e1f971a4447cffe365d3a359e2d4089b958f5",
+  "license": "OFL-1.1",
+  "license_file": "OFL.txt",
+  "archive_directory": "NotoSans/unhinted/ttf",
+  "files": {
+    "NotoSans-Regular.ttf": "f3961a9cde016d41a4879aecda1474d3a36d6bf54fa0e4643de029cc2248b0e8",
+    "NotoSans-SemiBold.ttf": "a7af8d4a11e8e49fea9a19786a6469210b512cd4061413e8036bdd2425722795"
+  }
+}

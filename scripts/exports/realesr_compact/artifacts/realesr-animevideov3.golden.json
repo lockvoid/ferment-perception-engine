@@ -1,0 +1,21 @@
+{
+  "config": "realesr-animevideov3",
+  "onnx": "realesr-animevideov3.fp16.onnx",
+  "sha256": "649d6939c15adb8541a136fc890fb22cbb890d37730efce9a5e89f85d2e60b45",
+  "bytes": 1250277,
+  "opset": 17,
+  "golden_input_shape": [
+    1,
+    3,
+    64,
+    64
+  ],
+  "golden_output_shape": [
+    1,
+    3,
+    256,
+    256
+  ],
+  "cpu_max_abs_diff_vs_torch_fp32": 0.0017552822828292847,
+  "cpu_psnr_db_vs_torch_fp32": 70.0300820122967
+}

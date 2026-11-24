@@ -1,0 +1,29 @@
+[package]
+name = "ferment-engine-audio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+bytes.workspace = true
+ferment-engine-core.workspace = true
+hound.workspace = true
+realfft.workspace = true
+rubato.workspace = true
+rustfft.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+approx = "0.5"
+ferment-engine-test-fixtures.workspace = true
+ndarray = "0.17"
+ndarray-npy = "0.10"
+serde_json.workspace = true

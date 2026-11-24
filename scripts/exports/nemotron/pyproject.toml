@@ -1,0 +1,15 @@
+[project]
+name = "nemotron-export"
+version = "0.1.0"
+description = "nvidia/nemotron-3.5-asr-streaming-0.6b (OpenMDW-1.1) 560 ms tier -> three ONNX graphs + sidecars + Rust goldens"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "nemo_toolkit[asr]",
+    "torch>=2.0,<2.8",
+    "soundfile",
+    "librosa",
+    "numpy<2",
+    "onnx>=1.16,<1.20",
+    "onnxruntime>=1.18",
+    "huggingface-hub",
+]

@@ -1,0 +1,20 @@
+[package]
+name = "ferment-engine-models"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+ferment-engine-core.workspace = true
+ferment-engine-infer.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+ferment-engine-test-fixtures.workspace = true

@@ -1,0 +1,20 @@
+{
+  "upstream": "https://github.com/facebookresearch/EdgeTAM",
+  "license": "Apache-2.0",
+  "image_size": 1024,
+  "low_resolution_mask": 256,
+  "candidates": 4,
+  "boundary_dtype": "float16",
+  "graphs_exported": [
+    "edgetam_v1_image_encoder",
+    "edgetam_v1_prompt_mask_decoder",
+    "edgetam_v1_memory_encoder"
+  ],
+  "graphs_blocked": {
+    "edgetam_v1_memory_attention": "needs a key-padding mask threaded through MemoryAttention for the fixed 7/16-slot bank (report \u00a77 N-4)"
+  },
+  "memory_encoder_pinned_branches": {
+    "is_mask_from_pts": false,
+    "non_overlap_masks_for_mem_enc": false
+  }
+}

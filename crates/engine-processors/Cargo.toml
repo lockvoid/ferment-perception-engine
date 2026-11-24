@@ -1,0 +1,50 @@
+[package]
+name = "ferment-engine-processors"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = ["coreml"]
+coreml = ["ferment-engine-infer/coreml"]
+ort = ["ferment-engine-infer/ort"]
+
+[lints]
+workspace = true
+
+[dependencies]
+ab_glyph = "=0.2.32"
+async-trait.workspace = true
+bytes.workspace = true
+ferment-engine-audio.workspace = true
+ferment-engine-core.workspace = true
+ferment-engine-infer.workspace = true
+ferment-engine-media.workspace = true
+ferment-utils.workspace = true
+# The synchronous FrameInterpolator seam drives the async inference backend
+# (RIFE backing); same pattern as the project crate's engine facade.
+futures-executor = "0.3"
+half.workspace = true
+image.workspace = true
+hound.workspace = true
+pulp.workspace = true
+rustfft.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tiny-skia.workspace = true
+tracing.workspace = true
+unicode-segmentation.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+# The CoreML oracle exercises the shipped per-model compute pins (W5 review).
+ferment-engine-models.workspace = true
+approx = "0.5"
+ferment-engine-test-fixtures.workspace = true
+futures-executor = "0.3"
+
+[build-dependencies]
+ferment-ffmpeg-rpath.workspace = true

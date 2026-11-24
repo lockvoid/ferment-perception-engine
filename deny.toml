@@ -1,0 +1,38 @@
+# cargo-deny — license gate (Apache-2.0/MIT/BSD-family permissive only; copyleft denied
+# by omission: anything not on the allow list fails `cargo deny check licenses`).
+
+[licenses]
+version = 2
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.9
+exceptions = [
+    # The FFmpeg bindings. WTFPL is permissive (a public-domain-equivalent
+    # dedication) but not on the allow list, and putting it there would let it
+    # in everywhere. The libav* LIBRARIES are not crates and not cargo-deny's
+    # business: they are LGPL-2.1-or-later, linked dynamically, and carried by
+    # crates/engine-processors/notices/THIRD_PARTY_NOTICES.md. Version-scoped
+    # so an upgrade of either crate is re-audited.
+    { name = "ffmpeg-next", version = "=9.0.0", allow = ["WTFPL"] },
+    { name = "ffmpeg-sys-next", version = "=9.0.0", allow = ["WTFPL"] },
+    # UniFFI and its macro/meta crates are MPL-2.0: file-level copyleft on
+    # THEIR sources, which we neither modify nor redistribute as source. The
+    # generated Kotlin is ours. Version-scoped so an upgrade is re-audited
+    # (Android ruling 29; the same crates already ship in native/loro).
+    { name = "uniffi", version = "=0.31.1", allow = ["MPL-2.0"] },
+    { name = "uniffi_core", version = "=0.31.1", allow = ["MPL-2.0"] },
+    { name = "uniffi_internal_macros", version = "=0.31.1", allow = ["MPL-2.0"] },
+    { name = "uniffi_macros", version = "=0.31.1", allow = ["MPL-2.0"] },
+    { name = "uniffi_meta", version = "=0.31.1", allow = ["MPL-2.0"] },
+    { name = "uniffi_pipeline", version = "=0.31.1", allow = ["MPL-2.0"] },
+]
+# Workspace crates are unpublished (publish = false) and proprietary; not subject to the gate.
+private = { ignore = true }

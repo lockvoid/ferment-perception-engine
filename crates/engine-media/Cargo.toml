@@ -1,0 +1,91 @@
+[package]
+name = "ferment-engine-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+
+[lints.rust]
+# The crate is otherwise safe Rust. The target-gated macOS modules are small,
+# documented CoreMedia/VideoToolbox and AudioToolbox FFI boundaries.
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[dependencies]
+async-trait.workspace = true
+# The media backend. Linked DYNAMICALLY against the LGPL-2.1-or-later shared
+# libraries `scripts/provision-ffmpeg` vendors — never the `build` or `static`
+# features, which would compile FFmpeg into this binary and make the whole app
+# a derived work.
+ffmpeg-next = { version = "9.0.0", default-features = false, features = [
+    "codec",
+    "format",
+    "filter",
+    "software-scaling",
+    "software-resampling",
+] }
+log = "0.4"
+thiserror.workspace = true
+
+# The NDK media APIs the Android platform module binds: AMediaExtractor,
+# AMediaCodec, AMediaFormat, AMediaMuxer, AImageReader/AImage. Pre-generated
+# bindgen output, no build-time NDK dependency; `media` links `libmediandk.so`
+# and the crate always links `libandroid.so`. `libc` is here for the two file
+# descriptors the NDK takes instead of paths (the extractor's source and the
+# muxer's sink).
+[target.'cfg(target_os = "android")'.dependencies]
+libc = "0.2"
+ndk-sys = { version = "0.6", features = ["media"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CFArray",
+    "CFData",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+] }
+objc2-core-media = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CMBase",
+    "CMBlockBuffer",
+    "CMFormatDescription",
+    "CMSampleBuffer",
+    "CMTime",
+    "objc2-core-video",
+] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CVBase",
+    "CVBuffer",
+    "CVImageBuffer",
+    "CVPixelBuffer",
+    "CVPixelBufferIOSurface",
+    "CVReturn",
+] }
+objc2-video-toolbox = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "VTCompressionProperties",
+    "VTCompressionSession",
+    "VTDecompressionSession",
+    "VTErrors",
+    "VTPixelTransferProperties",
+    "VTPixelTransferSession",
+    "VTSession",
+    "objc2-core-media",
+    "objc2-core-video",
+] }
+
+[dev-dependencies]
+futures-executor = "0.3"
+sha2.workspace = true
+
+[build-dependencies]
+ferment-ffmpeg-rpath.workspace = true

@@ -1,0 +1,68 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+exclude = ["vendor"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "Proprietary"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[workspace.dependencies]
+async-trait = "0.1"
+bytes = "1.11"
+coreml-native = "=0.2.0"
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+half = "2"
+hound = "3.5"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# `half` because EdgeTAM's every tensor boundary is FP16 and its parity
+# fixtures pin BIT PATTERNS: without it `ort` has no `f16` element type and the
+# halves would have to be promoted at the door and rounded again inside the
+# graph. `EngineFacadeSmokeTest` on cuts-36 is what found the door shut.
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "load-dynamic", "api-24", "half"] }
+pulp = { version = "0.22.3", default-features = false, features = ["std", "x86-v3"] }
+realfft = { version = "3.5", features = ["wasm_simd"] }
+rubato = "0.16"
+rustfft = { version = "6.4", features = ["wasm_simd"] }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tiny-skia = "0.11"
+tracing = "0.1"
+unicode-segmentation = "1.12"
+
+# Internal engine crates.
+ferment-engine-core = { path = "crates/engine-core" }
+ferment-engine-audio = { path = "crates/engine-audio" }
+ferment-engine-media = { path = "crates/engine-media" }
+ferment-engine-infer = { path = "crates/engine-infer", default-features = false }
+ferment-engine-models = { path = "crates/engine-models" }
+ferment-engine-test-fixtures = { path = "crates/engine-test-fixtures" }
+ferment-ffmpeg-rpath = { path = "crates/ffmpeg-rpath" }
+
+# Pinned source snapshot with the shared ID and rank vectors.
+ferment-utils = { path = "crates/utils" }
+
+# 0.2.0 loaded `CpuOnly` as `cpuAndGPU` and `CpuAndNeuralEngine` as `all`;
+# `crates/engine-infer/tests/coreml_units.rs` holds the fix.
+[patch.crates-io]
+coreml-native = { path = "vendor/coreml-native" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
+
+[profile.test]
+opt-level = 2

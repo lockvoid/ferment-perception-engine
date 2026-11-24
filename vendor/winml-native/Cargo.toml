@@ -1,0 +1,14 @@
+[package]
+name = "winml-native"
+version = "0.1.0"
+edition = "2024"
+license = "Proprietary"
+publish = false
+description = "Safe Windows ML catalog and ONNX Runtime assignment facade"
+
+[dependencies]
+libloading = "0.9"
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "load-dynamic", "api-24"] }
+
+[build-dependencies]
+bindgen = "=0.72.1"

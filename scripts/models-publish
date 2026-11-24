@@ -1,0 +1,619 @@
+#!/usr/bin/env python3
+"""Stage the complete model pack for the Studio CDN.
+
+    scripts/models-publish              stage + verify into dist/models-publish/
+    scripts/models-publish --force      restage the Core ML folders from scratch
+    scripts/models-publish --check      verify the CDN already serves the pack
+    scripts/models-publish --check --base http://127.0.0.1:8000
+                                        …or verify a mirror before it is one
+
+A model is no longer an archive. The Core ML tier ships as a PREFIX plus a
+manifest — the objects under `<name>.mlmodelc/` ARE the model, and
+`<name>.mlmodelc.manifest.json` (with its `.sha256` sidecar) is the only thing
+that knows the set is complete. This is the iOS scheme, byte for byte
+(`Scripts/cdn/make-manifests.py` @ ferment-cuts-ios HEAD), which retired the
+zip lane there in `0c6b29c31`.
+
+The staged tree is the COMPLETE upload set:
+
+    dist/models-publish/
+      <file>.onnx / <file>.fp16.onnx           the raw ONNX masters, flat
+      <name>.mlmodelc/<path>                   the compiled Core ML objects
+      <name>.mlmodelc.manifest.json            compact JSON + trailing newline
+      <name>.mlmodelc.manifest.json.sha256     `shasum -a 256`-shaped sidecar
+      <resource>.json                          bundled inputs, staged already
+
+Sources of truth. The fleet manifest (via the `manifest_json` example) supplies
+every file name, digest and URL. ONNX bytes come from the audited master
+locations — ../ferment-models and scripts/exports/*/artifacts. The Core ML
+folders are unzipped from `dist/models-publish-cache/*.mlmodelc.zip`, which are
+byte-mirrors of the July iOS CDN; they are NOT re-fetched, because the iOS
+objects have since drifted (`*_pal8_*`) and Studio's Core ML families are
+qualified against these exact bytes. That is the assertion this script makes
+loudest: every staged folder's deterministic tree hash must equal the `sha256`
+the fleet already pins. If a folder hashes differently, the bytes changed and
+the fleet is wrong about them — the script refuses rather than staging.
+
+Nothing here uploads. The upload commands are printed for the human step, in
+the order the layout requires: payload first and immutable, manifests LAST and
+short-cached, because a stale manifest at the edge is the one failure a
+prefix+manifest layout can produce.
+"""
+
+import argparse
+import ctypes
+import ctypes.util
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import zipfile
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+STAGING = os.path.join(ROOT, "dist", "models-publish")
+CACHE = os.path.join(ROOT, "dist", "models-publish-cache")
+MODELS_REPO = os.path.join(ROOT, "..", "ferment-models")
+EXPORTS = os.path.join(ROOT, "scripts", "exports")
+# Outside the staging tree on purpose: it is stage 2's input, not an object.
+# The fleet is Studio's catalog, exactly as `ModelManifest.all` is iOS's, and
+# putting an index next to the payload would invite a client to read it.
+PINS = os.path.join(CACHE, "manifest-pins.json")
+
+# Finder droppings. They are in nobody's model, so staging one would ship a
+# file the artifact never had — and would break the tree hash the fleet pins.
+IGNORED_NAMES = {".DS_Store"}
+
+CHUNK = 4 * 1024 * 1024
+
+
+# --------------------------------------------------------------------------
+# Digests
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while True:
+            block = handle.read(CHUNK)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def sha256_stream(handle):
+    digest = hashlib.sha256()
+    size = 0
+    while True:
+        block = handle.read(CHUNK)
+        if not block:
+            break
+        digest.update(block)
+        size += len(block)
+    return digest.hexdigest(), size
+
+
+def tree_sha256(root):
+    """`ferment_engine_models::sha256_path` over a directory, reimplemented.
+
+    Files sorted by path COMPONENTS (Rust's `PathBuf: Ord`, not a plain byte
+    sort of the joined string), then for each: the relative path's bytes, a NUL,
+    the file's bytes. The fleet's Core ML `sha256` values are this function's
+    output over the extracted mlmodelc trees, so a mismatch here means the
+    staged bytes are not the bytes the fleet qualified.
+    """
+    files = []
+    for directory, _, filenames in os.walk(root):
+        for filename in filenames:
+            absolute = os.path.join(directory, filename)
+            relative = os.path.relpath(absolute, root)
+            files.append((tuple(relative.split(os.sep)), relative, absolute))
+    files.sort(key=lambda entry: entry[0])
+
+    digest = hashlib.sha256()
+    for _, relative, absolute in files:
+        digest.update(relative.replace(os.sep, "/").encode())
+        digest.update(b"\0")
+        with open(absolute, "rb") as handle:
+            while True:
+                block = handle.read(CHUNK)
+                if not block:
+                    break
+                digest.update(block)
+    return digest.hexdigest()
+
+
+def _load_clonefile():
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        fn = libc.clonefile
+        fn.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint32]
+        fn.restype = ctypes.c_int
+        return fn
+    except (OSError, AttributeError):
+        return None
+
+
+_clonefile = _load_clonefile()
+
+
+def clone_or_copy(source, destination):
+    """APFS clone when we can — a 1.2 GB master is staged instantly and takes
+    no second copy of the disk — plain copy otherwise. Either way the
+    destination is an independent file."""
+    if os.path.exists(destination):
+        os.remove(destination)
+    if _clonefile is not None and _clonefile(source.encode(), destination.encode(), 0) == 0:
+        return
+    shutil.copy2(source, destination)
+
+
+# --------------------------------------------------------------------------
+# The fleet
+
+
+def fleet_manifest():
+    dump = subprocess.run(
+        ["cargo", "run", "-q", "-p", "ferment-engine-models", "--example", "manifest_json"],
+        cwd=ROOT, check=True, capture_output=True)
+    return json.loads(dump.stdout)
+
+
+class RawObject:
+    """One flat ONNX master: the fetched bytes ARE the artifact."""
+
+    def __init__(self, file_name, sha256, url):
+        self.file_name = file_name
+        self.sha256 = sha256
+        self.url = url
+
+
+class FolderObject:
+    """One Core ML model: a prefix of objects, a manifest, and a sidecar."""
+
+    def __init__(self, name, tree_sha256, prefix_url, pin):
+        self.name = name
+        self.tree_sha256 = tree_sha256
+        self.prefix_url = prefix_url
+        # The manifest digest the fleet compiles in, once stage 2 lands. Before
+        # then there is nothing to check a fetched manifest against, and
+        # `--check` says so instead of pretending.
+        self.pin = pin
+
+
+def plan(manifest):
+    """What the CDN must carry, read off the fleet."""
+    raw, folders = [], []
+    for model in manifest["models"]:
+        for artifact in model["artifacts"]:
+            source = artifact.get("source") or {}
+            kind = source.get("kind")
+            if artifact["backend"] == "ort":
+                if kind != "download" or "/ferment/studio/models/" not in source.get("url", ""):
+                    continue
+                raw.append(RawObject(artifact["file_name"], artifact["sha256"], source["url"]))
+            elif artifact["backend"] == "core_ml":
+                if kind == "manifest_prefix":
+                    folders.append(FolderObject(
+                        artifact["file_name"], artifact["sha256"],
+                        source["prefix_url"], source["manifest_sha256"]))
+                elif kind == "download":
+                    # The pre-manifest fleet: the object is the same tree, the
+                    # zip suffix is the wrapper this track is removing.
+                    folders.append(FolderObject(
+                        artifact["file_name"], artifact["sha256"],
+                        source["url"][: -len(".zip")], None))
+    raw.sort(key=lambda entry: entry.file_name)
+    folders.sort(key=lambda entry: entry.name)
+    return raw, folders
+
+
+def bundled_resource_names(manifest):
+    return {resource["file_name"] for resource in manifest["resources"]}
+
+
+# --------------------------------------------------------------------------
+# Staging: the raw masters
+
+
+def locate_master(file_name):
+    candidates = [os.path.join(MODELS_REPO, file_name), os.path.join(CACHE, file_name)]
+    if os.path.isdir(EXPORTS):
+        candidates += [
+            os.path.join(EXPORTS, export, "artifacts", file_name)
+            for export in sorted(os.listdir(EXPORTS))
+        ]
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def stage_raw(entry):
+    """(status, note). Already-correct staged bytes are left alone: this tree
+    is ~7 GB and a republish must not rewrite the 30 files that did not move."""
+    target = os.path.join(STAGING, entry.file_name)
+    if os.path.isfile(target) and sha256_file(target) == entry.sha256:
+        return "ok", "already staged"
+
+    source = locate_master(entry.file_name)
+    if source is None:
+        return "missing", "no master in ../ferment-models, scripts/exports/*/artifacts, or the cache"
+    actual = sha256_file(source)
+    if actual != entry.sha256:
+        return "digest", f"fleet {entry.sha256[:12]} != master {actual[:12]} ({source})"
+    clone_or_copy(source, target)
+    if sha256_file(target) != entry.sha256:
+        return "digest", "staged copy does not read back as the master"
+    return "staged", source
+
+
+# --------------------------------------------------------------------------
+# Staging: the Core ML folders
+
+
+def read_archive(path, name):
+    """{relative path: (sha256, bytes)} for one cached zip, read straight from
+    the archive. This is the independent side of the zip-vs-staged comparison
+    `Scripts/cdn/verify-upload-against-zips.py` runs on iOS: the bytes are
+    hashed out of the archive here and off the disk after extraction, and the
+    two sets must be identical."""
+    prefix = name + "/"
+    members, directories = {}, set()
+    with zipfile.ZipFile(path) as archive:
+        for info in archive.infolist():
+            if (info.external_attr >> 16) & 0o170000 == 0o120000:
+                sys.exit(f"{name}: '{info.filename}' is a symlink — an object store cannot carry one")
+            if not info.filename.startswith(prefix):
+                sys.exit(f"{name}: '{info.filename}' is outside the archive root '{name}'")
+            relative = info.filename[len(prefix):]
+            if info.is_dir():
+                if relative:
+                    directories.add(relative.rstrip("/"))
+                continue
+            if not is_safe_relative_path(relative):
+                sys.exit(f"{name}: '{info.filename}' is not a safe relative path")
+            if os.path.basename(relative) in IGNORED_NAMES:
+                continue
+            with archive.open(info) as handle:
+                digest, size = sha256_stream(handle)
+            members[relative] = (digest, size)
+
+    for directory in sorted(directories):
+        if not any(path.startswith(directory + "/") for path in members):
+            sys.exit(f"{name}: '{directory}/' is empty — a manifest of files cannot carry it")
+    if not members:
+        sys.exit(f"{name}: the archive carries no files")
+    return members
+
+
+def is_safe_relative_path(path):
+    if not path or path.startswith("/") or "\0" in path or "\\" in path:
+        return False
+    return all(segment not in ("", ".", "..") for segment in path.split("/"))
+
+
+def extract(path, name, destination):
+    prefix = name + "/"
+    if os.path.exists(destination):
+        shutil.rmtree(destination)
+    os.makedirs(destination)
+    with zipfile.ZipFile(path) as archive:
+        for info in archive.infolist():
+            if info.is_dir():
+                continue
+            relative = info.filename[len(prefix):]
+            if os.path.basename(relative) in IGNORED_NAMES:
+                continue
+            target = os.path.join(destination, relative.replace("/", os.sep))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with archive.open(info) as source, open(target, "wb") as handle:
+                shutil.copyfileobj(source, handle, CHUNK)
+
+
+def manifest_bytes(entries):
+    """The iOS byte format, exactly: compact JSON, one trailing newline. The
+    digest of THESE bytes is what the client pins, so the separators and the
+    newline are part of the contract, not formatting."""
+    body = {"files": [{"path": path, "bytes": size, "sha256": digest}
+                      for path, size, digest in entries]}
+    return json.dumps(body, separators=(",", ":")).encode() + b"\n"
+
+
+def describe(files, digest):
+    """The row this track has to be able to show for all 17: how many objects,
+    how big, what the manifest hashes to — and that the staged tree still hashes
+    to what the fleet already pinned against the July zips."""
+    total = sum(entry["bytes"] for entry in files)
+    return f"{len(files)} files, {human(total)}, manifest {digest[:12]}, tree matches the fleet pin"
+
+
+def stage_folder(entry, force):
+    """(status, note, manifest digest). Refuses on any disagreement between the
+    zip, the extracted tree, the manifest it just wrote, and the fleet's pin."""
+    archive = os.path.join(CACHE, f"{entry.name}.zip")
+    destination = os.path.join(STAGING, entry.name)
+    manifest_path = os.path.join(STAGING, f"{entry.name}.manifest.json")
+    sidecar_path = manifest_path + ".sha256"
+
+    if not os.path.isfile(archive):
+        return "missing", f"{archive} is absent — the pinned zips are the only source", None
+
+    # A staged folder that still hashes to the fleet's pin, with a manifest
+    # whose digest matches its own sidecar, is finished work. Re-extracting
+    # 1.5 GB to arrive at the same bytes is not a verification.
+    if not force and os.path.isdir(destination) and os.path.isfile(manifest_path):
+        with open(manifest_path, "rb") as handle:
+            body = handle.read()
+        if tree_sha256(destination) == entry.tree_sha256:
+            digest = hashlib.sha256(body).hexdigest()
+            if os.path.isfile(sidecar_path):
+                with open(sidecar_path) as handle:
+                    if handle.read().split()[0] == digest:
+                        files = json.loads(body)["files"]
+                        return "ok", describe(files, digest), digest
+
+    members = read_archive(archive, entry.name)
+    extract(archive, entry.name, destination)
+
+    staged = {}
+    for directory, _, filenames in os.walk(destination):
+        for filename in filenames:
+            absolute = os.path.join(directory, filename)
+            if os.path.islink(absolute):
+                sys.exit(f"{entry.name}: staged '{absolute}' is a symlink")
+            relative = os.path.relpath(absolute, destination).replace(os.sep, "/")
+            staged[relative] = (sha256_file(absolute), os.path.getsize(absolute))
+
+    if set(staged) != set(members):
+        only_zip = sorted(set(members) - set(staged))
+        only_staged = sorted(set(staged) - set(members))
+        return "mismatch", f"path sets differ (zip only: {only_zip}, staged only: {only_staged})", None
+    for path, (digest, size) in sorted(staged.items()):
+        if (digest, size) != members[path]:
+            return "mismatch", f"{path}: zip {members[path][0][:12]} != staged {digest[:12]}", None
+
+    # Manifest entry order is the iOS walk's: sorted by relative path. (That is
+    # NOT the tree hash's component order — two orders, two purposes, both
+    # copied rather than invented.)
+    entries = sorted((path, size, digest) for path, (digest, size) in staged.items())
+    body = manifest_bytes(entries)
+    digest = hashlib.sha256(body).hexdigest()
+
+    staged_tree = tree_sha256(destination)
+    if staged_tree != entry.tree_sha256:
+        return "tree", f"fleet pins {entry.tree_sha256}, staged tree hashes {staged_tree}", None
+
+    with open(manifest_path, "wb") as handle:
+        handle.write(body)
+    with open(sidecar_path, "w") as handle:
+        handle.write(f"{digest}  {entry.name}.manifest.json\n")
+    files = [{"path": path, "bytes": size, "sha256": file_digest}
+             for path, size, file_digest in entries]
+    return "staged", describe(files, digest), digest
+
+
+# --------------------------------------------------------------------------
+# Staging: the tree as a whole
+
+
+def prune(expected):
+    """Anything staged that this layout does not name — most immediately the 17
+    zips the manifest lane replaces. The staging directory IS the upload set, so
+    a leftover here is an object on the CDN."""
+    removed = []
+    for name in sorted(os.listdir(STAGING)):
+        if name in expected:
+            continue
+        path = os.path.join(STAGING, name)
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
+        removed.append(name)
+    return removed
+
+
+def directory_bytes(path):
+    if os.path.isfile(path):
+        return os.path.getsize(path)
+    total = 0
+    for directory, _, filenames in os.walk(path):
+        total += sum(os.path.getsize(os.path.join(directory, f)) for f in filenames)
+    return total
+
+
+def human(size):
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
+def upload_plan(raw, folders, base):
+    print("\nUpload, in this order — payload immutable first, manifests last and")
+    print("short-cached (a stale manifest at the edge is the one failure this")
+    print("layout can produce):\n")
+    target = base.replace("https://public.lockvoid.com/", "s3://BUCKET/")
+    print("  # 1. the Core ML prefixes (--delete: a file dropped from a model")
+    print("  #    must stop existing rather than linger under the new manifest)")
+    for entry in folders:
+        print(f"  aws s3 sync {os.path.relpath(os.path.join(STAGING, entry.name), ROOT)}/ "
+              f"{target}/{entry.name}/ --delete \\\n"
+              f"    --cache-control \"public, max-age=31536000, immutable\"")
+    print(f"\n  # 2. the flat masters ({len(raw)} ONNX + the bundled JSON inputs)")
+    print(f"  aws s3 sync {os.path.relpath(STAGING, ROOT)}/ {target}/ \\\n"
+          f"    --exclude \"*\" --include \"*.onnx\" --include \"*.json\" "
+          f"--exclude \"*/*\" --exclude \"*.manifest.json\" \\\n"
+          f"    --cache-control \"public, max-age=31536000, immutable\"")
+    print("\n  # 3. the manifests and their sidecars — LAST")
+    print(f"  aws s3 sync {os.path.relpath(STAGING, ROOT)}/ {target}/ \\\n"
+          f"    --exclude \"*\" --include \"*.manifest.json\" --include \"*.manifest.json.sha256\" \\\n"
+          f"    --cache-control \"public, max-age=60\"")
+
+
+def stage(force):
+    manifest = fleet_manifest()
+    raw, folders = plan(manifest)
+    os.makedirs(STAGING, exist_ok=True)
+
+    failures = []
+    print(f"{'object':<44}  {'status':<9}  detail")
+    for entry in raw:
+        status, note = stage_raw(entry)
+        print(f"{entry.file_name:<44}  {status:<9}  {note}")
+        if status not in ("ok", "staged"):
+            failures.append((entry.file_name, note))
+
+    pins = {}
+    for entry in folders:
+        status, note, digest = stage_folder(entry, force)
+        print(f"{entry.name:<44}  {status:<9}  {note}")
+        if status in ("ok", "staged"):
+            pins[entry.name] = digest
+        else:
+            failures.append((entry.name, note))
+
+    expected = {entry.file_name for entry in raw}
+    expected |= bundled_resource_names(manifest)
+    for entry in folders:
+        expected |= {entry.name, f"{entry.name}.manifest.json",
+                     f"{entry.name}.manifest.json.sha256"}
+    removed = prune(expected)
+    if removed:
+        print("\nremoved from the staging tree (not part of this layout):")
+        for name in removed:
+            print(f"  {name}")
+
+    if failures:
+        print(f"\n{len(failures)} objects failed:")
+        for name, note in failures:
+            print(f"  {name}: {note}")
+        return 1
+
+    with open(PINS, "w") as handle:
+        json.dump(pins, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+    total = directory_bytes(STAGING)
+    resources = sorted(bundled_resource_names(manifest) & set(os.listdir(STAGING)))
+    print(f"\n{len(raw)} ONNX masters, {len(folders)} Core ML folders, "
+          f"{len(folders)} manifests + {len(folders)} sidecars, "
+          f"{len(resources)} bundled JSON inputs")
+    print(f"{human(total)} in {os.path.relpath(STAGING, ROOT)}")
+    print(f"{len(pins)} manifest pins -> {os.path.relpath(PINS, ROOT)}")
+
+    base = raw[0].url.rsplit("/", 1)[0] if raw else folders[0].prefix_url.rsplit("/", 1)[0]
+    upload_plan(raw, folders, base)
+    return 0
+
+
+# --------------------------------------------------------------------------
+# --check: what the CDN actually serves
+
+
+def fetch(url):
+    """The bytes at `url`, or None if it is not there. `curl` rather than
+    urllib: this reaches a real CDN and the redirect/TLS behaviour that matters
+    is the one every other tool in this repo already sees."""
+    result = subprocess.run(["curl", "-fsSL", url], capture_output=True)
+    return result.stdout if result.returncode == 0 else None
+
+
+def rebase(url, base):
+    """Point a fleet URL at another origin. `--check` against a local server
+    over `dist/models-publish/` is the only way to prove the staged tree is what
+    a client will accept BEFORE it is uploaded — which is the half of this gate
+    that does not need Dmitrii to have pushed anything yet."""
+    if base is None:
+        return url
+    return base.rstrip("/") + "/" + url.rsplit("/", 1)[1]
+
+
+def check(base):
+    manifest = fleet_manifest()
+    raw, folders = plan(manifest)
+    ok, failures, skipped = 0, [], []
+
+    for entry in raw:
+        url = rebase(entry.url, base)
+        body = fetch(url)
+        if body is None:
+            failures.append((entry.file_name, f"unreachable: {url}"))
+            continue
+        actual = hashlib.sha256(body).hexdigest()
+        if actual == entry.sha256:
+            ok += 1
+            print(f"OK        {entry.file_name}")
+        else:
+            failures.append((entry.file_name, f"CDN serves {actual[:12]}, fleet wants {entry.sha256[:12]}"))
+
+    for entry in folders:
+        if entry.pin is None:
+            skipped.append(entry.name)
+            continue
+        prefix_url = rebase(entry.prefix_url, base)
+        body = fetch(f"{prefix_url}.manifest.json")
+        if body is None:
+            failures.append((entry.name, f"unreachable: {prefix_url}.manifest.json"))
+            continue
+        actual = hashlib.sha256(body).hexdigest()
+        if actual != entry.pin:
+            failures.append((entry.name, f"manifest is {actual[:12]}, the fleet pins {entry.pin[:12]}"))
+            continue
+
+        # The sidecar is parity for tooling — the client never reads it — but a
+        # sidecar that disagrees with the manifest beside it means the upload
+        # ordering slipped, so it is worth the 100 bytes to say so.
+        sidecar = fetch(f"{prefix_url}.manifest.json.sha256")
+        if sidecar is None or sidecar.split()[0].decode() != actual:
+            failures.append((entry.name, "the .sha256 sidecar does not match the manifest"))
+            continue
+
+        problems = []
+        for file_entry in json.loads(body)["files"]:
+            payload = fetch(f"{prefix_url}/{file_entry['path']}")
+            if payload is None:
+                problems.append(f"{file_entry['path']}: unreachable")
+            elif len(payload) != file_entry["bytes"]:
+                problems.append(f"{file_entry['path']}: {len(payload)} bytes, manifest says {file_entry['bytes']}")
+            elif hashlib.sha256(payload).hexdigest() != file_entry["sha256"]:
+                problems.append(f"{file_entry['path']}: digest does not match the manifest")
+        if problems:
+            failures.append((entry.name, "; ".join(problems)))
+        else:
+            ok += 1
+            print(f"OK        {entry.name}  (manifest pin + every object)")
+
+    if skipped:
+        print("\nSKIPPED — the fleet still points these at the zip lane, so there is")
+        print("no compiled-in manifest pin to check a fetched manifest against:")
+        for name in skipped:
+            print(f"  {name}")
+    if failures:
+        print(f"\n{len(failures)} failed:")
+        for name, note in failures:
+            print(f"  {name}: {note}")
+    print(f"\n{ok} verified, {len(failures)} failed, {len(skipped)} skipped")
+    return 1 if failures else 0
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--check", action="store_true",
+                        help="verify the live CDN against the fleet instead of staging")
+    parser.add_argument("--force", action="store_true",
+                        help="restage the Core ML folders even when they already verify")
+    parser.add_argument("--base", metavar="URL",
+                        help="check against this origin instead of the fleet's own")
+    args = parser.parse_args()
+    return check(args.base) if args.check else stage(args.force)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

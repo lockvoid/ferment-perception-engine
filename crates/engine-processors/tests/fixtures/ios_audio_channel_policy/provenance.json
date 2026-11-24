@@ -1,0 +1,52 @@
+{
+  "oracle": "Current original iOS AudioReader + MediaTypeDetector linked directly, source pins in ../../reference/ios-audio-input-provenance.json",
+  "sample_rate": 16000,
+  "source_sample_rate": 44100,
+  "generation": "1s: left = 14000*sin(997Hz), right = 10000*cos(233Hz), int16; ffmpeg MP3/AAC video transcodes",
+  "cases": [
+    {
+      "fixture": "stereo.wav",
+      "source_sha256": "24c554258c5903b9289f3b7694f886eaa839fe9bb28d52ba2256d3b526aaf90a",
+      "pcm_sha256": "d72b9cab26a97b72041e4b455261801bb19fd42be18e0f348ad498daf37217f7",
+      "output_samples": 16000,
+      "fitted_left_right_weights": [
+        0.9999546942692757,
+        -9.725078762342945e-09
+      ]
+    },
+    {
+      "fixture": "stereo.mp3",
+      "source_sha256": "a6a80e7dd50d034ccf79cf3972fc0b0fec3266beeccf90e15ac01adbcd946acb",
+      "pcm_sha256": "811cb0314940b3c846d578524ae38eba2cce54f3acf869290e9e4d8e788a3cf7",
+      "output_samples": 16000,
+      "fitted_left_right_weights": [
+        0.9499372805324502,
+        -1.4591843226203877e-06
+      ]
+    },
+    {
+      "fixture": "stereo.mp4",
+      "source_sha256": "2daa91df08e8e452591c5158aaecdb82b4da0fae62ff083d96e4b4b646b5af7e",
+      "pcm_sha256": "ff7983a1adc85979b3967ed47fb26748d5d76ce967f2d6d1b9b3612d4d3f800a",
+      "output_samples": 15994,
+      "fitted_left_right_weights": [
+        0.6973195302622327,
+        0.7050700470964408
+      ]
+    }
+  ],
+  "swift_source": {
+    "Packages/FermentUtils/Sources/FermentUtils/AudioReader.swift": {
+      "sha256": "8ae57a0fa3163a7d4a9df72b2bdcba3b6c00a4a7b3d3fb085ecca7cdad95ecf8",
+      "bytes": 20633
+    },
+    "Packages/FermentUtils/Sources/FermentUtils/MediaTypeDetector.swift": {
+      "sha256": "f656dc8675448df8afe58be70f6aa3d45f50fae3990202dd0939700ab9abe0b3",
+      "bytes": 11207
+    },
+    "scripts/exports/nemotron/reference/DecodeIOSAudio.swift": {
+      "sha256": "40f22a47f748b052efc39bc192de2d21bff0a5a6defee3f704bdc87bea03f930",
+      "bytes": 1520
+    }
+  }
+}

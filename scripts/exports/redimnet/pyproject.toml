@@ -1,0 +1,14 @@
+[project]
+name = "redimnet-exports"
+version = "0.1.0"
+description = "ReDimNet2-B2 speaker encoder — traced ONNX export + torch-golden parity"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "torch>=2.3",
+    "torchaudio>=2.3",
+    "onnx>=1.16",
+    "onnxruntime>=1.20",
+    "numpy<2",
+    "soundfile",
+    "scipy",
+]

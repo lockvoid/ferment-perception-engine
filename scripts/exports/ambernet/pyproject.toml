@@ -1,0 +1,14 @@
+[project]
+name = "ambernet-export"
+version = "0.1.0"
+description = "NVIDIA AmberNet LangID (NGC langid_ambernet v1.12.0) -> ONNX export + goldens"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "nemo_toolkit[asr]",
+    "torch>=2.0,<2.8",
+    "soundfile",
+    "librosa",
+    "numpy<2",
+    "onnx>=1.16,<1.20",
+    "onnxruntime>=1.18",
+]

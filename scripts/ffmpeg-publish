@@ -1,0 +1,224 @@
+#!/usr/bin/env bash
+# Stage the FFmpeg artifacts for the Studio CDN, and say what to upload.
+#
+#   scripts/ffmpeg-publish                 verify the staged set, print the
+#                                          upload commands
+#   scripts/ffmpeg-publish --check         verify what the CDN already serves
+#   scripts/ffmpeg-publish --check --base http://127.0.0.1:8000
+#                                          …or verify a mirror before it is one
+#
+# Nothing here uploads. `aws s3 cp` is the human step, exactly as it is for
+# `scripts/models-publish` — this script's job is to refuse to print a command
+# for an artifact that does not verify.
+#
+# The upload set for a version is three kinds of object:
+#
+#   ffmpeg-<version>-<build>-<target>-lgpl-shared.tar.zst          the libraries
+#   ffmpeg-<version>-<build>-<target>-lgpl-shared.tar.zst.sha256   what provisioning checks
+#   ffmpeg-<version>.tar.xz                                        the LGPL source offer
+#
+# <build> is `scripts/provision-ffmpeg`'s BUILD: the same release compiled
+# with a different whitelist is a different, differently named object, because
+# nothing under the version prefix is ever rewritten. The source offer has no
+# build number — every build of a version is compiled from the same source.
+#
+# That last one is not a convenience. LGPL-2.1 §6 requires the complete
+# corresponding source of the libraries we ship, and
+# apps/desktop/src-tauri/THIRD_PARTY_NOTICES.md points at this exact URL — so
+# an upload that skips it publishes a licence violation.
+
+set -euo pipefail
+
+VERSION="${FFMPEG_VERSION:-8.1.2}"
+# Keep in step with scripts/provision-ffmpeg's BUILD default.
+BUILD="${FFMPEG_BUILD:-2}"
+ARTIFACT="$VERSION-$BUILD"
+TARGETS=(aarch64-apple-darwin x86_64-pc-windows-msvc x86_64-unknown-linux-gnu)
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+STAGING="$ROOT/dist/ffmpeg-publish/$VERSION"
+SOURCE_CACHE="$ROOT/tmp/ffmpeg-src"
+
+CDN_BASE="https://public.lockvoid.com/ferment/studio/vendor/ffmpeg/$VERSION"
+S3_BASE="s3://BUCKET/ferment/studio/vendor/ffmpeg/$VERSION"
+
+sha256_of() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | cut -d' ' -f1
+    else
+        sha256sum "$1" | cut -d' ' -f1
+    fi
+}
+
+human() { du -h "$1" | cut -f1; }
+
+# --------------------------------------------------------------------------
+# Staging: what `just provision-ffmpeg-build` left behind, checked.
+
+stage() {
+    local failures=() ok=() absent=()
+
+    printf '%-52s  %-9s  %s\n' object status detail
+    for target in "${TARGETS[@]}"; do
+        local name="ffmpeg-$ARTIFACT-$target-lgpl-shared.tar.zst"
+        local artifact="$STAGING/$name"
+        # Not staged is not broken: a build is published target by target
+        # as the machines that can make each one come round (docker for the
+        # cross-builds). Provisioning an absent target 404s — loudly, on
+        # purpose — until its object lands.
+        if [[ ! -f "$artifact" ]]; then
+            printf '%-52s  %-9s  %s\n' "$name" absent "not staged; run: just provision-ffmpeg-build"
+            absent+=("$name")
+            continue
+        fi
+        if [[ ! -f "$artifact.sha256" ]]; then
+            printf '%-52s  %-9s  %s\n' "$name" "no-digest" "$name.sha256 is absent"
+            failures+=("$name")
+            continue
+        fi
+        local want got
+        want="$(cut -d' ' -f1 <"$artifact.sha256")"
+        got="$(sha256_of "$artifact")"
+        if [[ "$want" != "$got" ]]; then
+            printf '%-52s  %-9s  %s\n' "$name" mismatch "sidecar $want, bytes $got"
+            failures+=("$name")
+            continue
+        fi
+        # An artifact whose libraries came from a GPL build would be a licence
+        # violation the notice file cannot fix. The configure line lives in
+        # `ffversion.h`'s neighbour; check the built library says LGPL.
+        if tar --use-compress-program=unzstd -xOf "$artifact" \
+            "$target/include/libavutil/avconfig.h" >/dev/null 2>&1; then
+            :
+        else
+            printf '%-52s  %-9s  %s\n' "$name" corrupt "cannot read the archive"
+            failures+=("$name")
+            continue
+        fi
+        printf '%-52s  %-9s  %s\n' "$name" ok "$(human "$artifact"), $got"
+        ok+=("$name")
+    done
+
+    local source="$SOURCE_CACHE/ffmpeg-$VERSION.tar.xz"
+    if [[ -f "$source" ]]; then
+        printf '%-52s  %-9s  %s\n' "ffmpeg-$VERSION.tar.xz" ok \
+            "$(human "$source"), $(sha256_of "$source")"
+    else
+        printf '%-52s  %-9s  %s\n' "ffmpeg-$VERSION.tar.xz" missing \
+            "the LGPL source offer — run: just provision-ffmpeg-build"
+        failures+=("ffmpeg-$VERSION.tar.xz")
+    fi
+
+    if ((${#failures[@]})); then
+        printf '\n%d objects failed; nothing to upload yet.\n' "${#failures[@]}"
+        return 1
+    fi
+    if ((${#ok[@]} == 0)); then
+        printf '\nNo artifact of build %s is staged; nothing to upload yet.\n' "$BUILD"
+        return 1
+    fi
+    if ((${#absent[@]})); then
+        printf '\nNOT in this upload (not staged): %s\n' "${absent[*]}"
+        printf 'provision-ffmpeg 404s for those targets until their build-%s objects are published.\n' "$BUILD"
+    fi
+
+    cat <<EOF
+
+Upload — the payload is immutable, so order does not matter here; every object
+is named by its version prefix and build number and never rewritten:
+
+  aws s3 cp $(realpath --relative-to="$ROOT" "$SOURCE_CACHE/ffmpeg-$VERSION.tar.xz" 2>/dev/null || echo "tmp/ffmpeg-src/ffmpeg-$VERSION.tar.xz") \\
+    $S3_BASE/ffmpeg-$VERSION.tar.xz \\
+    --cache-control "public, max-age=31536000, immutable"
+
+  aws s3 sync dist/ffmpeg-publish/$VERSION/ $S3_BASE/ \\
+    --cache-control "public, max-age=31536000, immutable"
+
+Then verify what the edge actually serves:
+
+  scripts/ffmpeg-publish --check
+EOF
+}
+
+# --------------------------------------------------------------------------
+# --check: what the CDN actually serves, against the staged digests.
+
+check() {
+    local base="${1:-$CDN_BASE}"
+    local ok=0 failures=()
+
+    for target in "${TARGETS[@]}"; do
+        local name="ffmpeg-$ARTIFACT-$target-lgpl-shared.tar.zst"
+        local sidecar
+        if ! sidecar="$(curl -fsSL --max-time 60 "$base/$name.sha256" 2>/dev/null)"; then
+            failures+=("$name: no .sha256 at $base")
+            continue
+        fi
+        local want
+        want="$(cut -d' ' -f1 <<<"$sidecar")"
+        local got
+        if ! got="$(curl -fsSL --max-time 900 "$base/$name" 2>/dev/null | shasum -a 256 | cut -d' ' -f1)"; then
+            failures+=("$name: unreachable at $base")
+            continue
+        fi
+        if [[ "$want" != "$got" ]]; then
+            failures+=("$name: sidecar says $want, the CDN serves $got")
+            continue
+        fi
+        # Provisioning trusts the sidecar, so a sidecar that disagrees with the
+        # staged artifact means the wrong bytes were uploaded under a right-
+        # looking name — the one failure this layout can produce.
+        local staged="$STAGING/$name.sha256"
+        if [[ -f "$staged" ]] && [[ "$(cut -d' ' -f1 <"$staged")" != "$want" ]]; then
+            failures+=("$name: the CDN's digest is not the staged one")
+            continue
+        fi
+        echo "OK        $name"
+        ok=$((ok + 1))
+    done
+
+    # The source offer. Its absence is a licence problem, not a convenience one.
+    if curl -fsSLI --max-time 60 "$base/ffmpeg-$VERSION.tar.xz" >/dev/null 2>&1; then
+        echo "OK        ffmpeg-$VERSION.tar.xz  (the LGPL source offer)"
+        ok=$((ok + 1))
+    else
+        failures+=("ffmpeg-$VERSION.tar.xz: the LGPL source offer is not served")
+    fi
+
+    if ((${#failures[@]})); then
+        printf '\n%d failed:\n' "${#failures[@]}"
+        printf '  %s\n' "${failures[@]}"
+    fi
+    printf '\n%d verified, %d failed\n' "$ok" "${#failures[@]}"
+    ((${#failures[@]} == 0))
+}
+
+# --------------------------------------------------------------------------
+
+main() {
+    local mode=stage base=""
+    while (($#)); do
+        case "$1" in
+        --check) mode=check ;;
+        --base)
+            shift
+            base="$1"
+            ;;
+        -h | --help)
+            sed -n '2,25p' "${BASH_SOURCE[0]}"
+            exit 0
+            ;;
+        *)
+            echo "ffmpeg-publish: unknown argument $1" >&2
+            exit 1
+            ;;
+        esac
+        shift
+    done
+    case "$mode" in
+    stage) stage ;;
+    check) check "${base:-$CDN_BASE}" ;;
+    esac
+}
+
+main "$@"

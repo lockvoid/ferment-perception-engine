@@ -1,0 +1,91 @@
+{
+  "between": [
+    {
+      "low": null,
+      "high": null,
+      "rank": "U"
+    },
+    {
+      "low": "a0",
+      "high": null,
+      "rank": "n"
+    },
+    {
+      "low": "a0",
+      "high": "a1",
+      "rank": "a0U"
+    },
+    {
+      "low": null,
+      "high": "a0",
+      "rank": "H"
+    },
+    {
+      "low": "V",
+      "high": null,
+      "rank": "k"
+    },
+    {
+      "low": "U",
+      "high": "V",
+      "rank": "UU"
+    },
+    {
+      "low": "zzz",
+      "high": null,
+      "rank": "zzzU"
+    },
+    {
+      "low": "a0",
+      "high": "a0V",
+      "rank": "a0F"
+    },
+    {
+      "low": null,
+      "high": "0",
+      "rank": "0U"
+    },
+    {
+      "low": "0",
+      "high": "1",
+      "rank": "0U"
+    },
+    {
+      "low": "ZZ",
+      "high": "Za",
+      "rank": "ZZU"
+    },
+    {
+      "low": "a",
+      "high": "b",
+      "rank": "aU"
+    }
+  ],
+  "appendChain": [
+    "U",
+    "k",
+    "s",
+    "w",
+    "y",
+    "z",
+    "zU",
+    "zk",
+    "zs",
+    "zw",
+    "zy",
+    "zz",
+    "zzU",
+    "zzk",
+    "zzs",
+    "zzw",
+    "zzy",
+    "zzz",
+    "zzzU",
+    "zzzk",
+    "zzzs",
+    "zzzw",
+    "zzzy",
+    "zzzz"
+  ],
+  "alphabet": "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+}

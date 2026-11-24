@@ -1,0 +1,25 @@
+# Shipped x86_64 artifacts use the distribution floor, never the build host's
+# full feature set. `pulp` still runtime-dispatches above this baseline.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+# The FFmpeg libav* headers and link libraries `ferment-engine-media` builds
+# against. `ffmpeg-sys-next` reads `$FFMPEG_DIR/include` with bindgen and links
+# dynamically out of `$FFMPEG_DIR/lib` — no `build` feature, no static link.
+#
+# `vendor/ffmpeg/host` is a symlink `scripts/provision-ffmpeg` points at the
+# host target, so this one relative path is right on mac, Windows and the
+# Linux lint runner. Run `just provision-ffmpeg-mac` (or -win/-linux) once; a
+# developer who exports their own FFMPEG_DIR keeps it, because `[env]` only
+# fills a variable that is not already set.
+[env]
+FFMPEG_DIR = { value = "vendor/ffmpeg/host", relative = true }

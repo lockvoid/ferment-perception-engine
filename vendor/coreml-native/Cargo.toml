@@ -1,0 +1,54 @@
+[package]
+name = "coreml-native"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.75.0"
+license = "Apache-2.0 OR MIT"
+description = "Safe, ergonomic Rust bindings for Apple CoreML inference with ANE acceleration"
+authors = ["coreml-native contributors"]
+repository = "https://github.com/robertelee78/coreml-native"
+documentation = "https://docs.rs/coreml-native"
+keywords = ["coreml", "apple", "neural-engine", "inference", "machine-learning"]
+categories = ["os::macos-apis", "science"]
+exclude = [".claude/", ".claude-flow/", "_bmad/", "_bmad-output/", "docs/", "scripts/", ".github/"]
+homepage = "https://github.com/robertelee78/coreml-native"
+readme = "README.md"
+
+[dependencies]
+ndarray = { version = "0.16", optional = true }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSString", "NSArray", "NSDictionary", "NSValue",
+    "NSURL", "NSError", "NSSet", "NSEnumerator",
+    "NSObjCRuntime", "NSData",
+] }
+objc2-core-ml = { version = "0.3", features = [
+    "MLModel",
+    "MLModelConfiguration",
+    "MLModelDescription",
+    "MLMultiArray",
+    "MLMultiArrayConstraint",
+    "MLMultiArrayShapeConstraint",
+    "MLMultiArrayShapeConstraintType",
+    "MLFeatureValue",
+    "MLFeatureDescription",
+    "MLFeatureType",
+    "MLDictionaryFeatureProvider",
+    "MLFeatureProvider",
+    "MLPredictionOptions",
+    "MLBatchProvider",
+    "MLArrayBatchProvider",
+    "MLOptimizationHints",
+    "MLModel_MLModelCompilation",
+    "MLModelAsset",
+    "block2",
+] }
+block2 = "0.6"
+
+[dev-dependencies]
+
+[features]
+default = []
+ndarray = ["dep:ndarray"]

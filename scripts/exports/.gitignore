@@ -1,0 +1,28 @@
+# Per-model export working dirs. The Python envs and downloaded checkpoints are
+# Mac-local and must NEVER sync to the Windows box (scripts/sync uses
+# --ignore-vcs, so anything ignored here is skipped by mutagen).
+#
+# The small ONNX masters + golden .npy tensors under */artifacts/ are NOT
+# ignored on purpose: the box replays them on the DirectML/CUDA EPs.
+.venv/
+__pycache__/
+*.pth
+*.pt
+*.fp32.onnx
+
+# Vendored upstream model code, cloned at a pinned commit by export.py, which
+# re-checks the commit out on every run. Re-clonable, and a nested .git inside
+# the tree is not something to commit.
+redimnet/checkpoints/
+
+# ReDimNet2-B2 is 15.3 MB (whole-graph fp32 — the mel frontend cannot be fp16,
+# see export.py), over the >10 MB rule. `uv run python export.py` regenerates it
+# byte-for-byte from the pinned upstream commit, and the Studio CDN serves it.
+redimnet/artifacts/redimnet_speaker.onnx
+
+# Video saliency: the untrimmed U^2-Netp download (export.py trims it to the d0
+# head and that trimmed master IS committed) and the upstream demo photo that
+# gen_goldens.py derives the two committed reference frames from. Both are
+# re-fetchable from their pinned URLs.
+video_saliency/artifacts/u2netp.onnx
+video_saliency/frames/largest_selfie.jpg

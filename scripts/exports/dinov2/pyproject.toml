@@ -1,0 +1,12 @@
+[project]
+name = "dinov2-export"
+version = "0.1.0"
+description = "DINOv2 ViT-S/14 -> ONNX visual semantic encoder (mirrors ferment-cuts-ios Scripts/visual_semantic_encoder/convert.py)"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "torch>=2.8,<2.9",
+    "numpy<2",
+    "onnx>=1.16,<1.20",
+    "onnxruntime>=1.18",
+    "pillow>=10",
+]

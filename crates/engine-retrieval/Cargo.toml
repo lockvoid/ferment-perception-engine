@@ -1,0 +1,32 @@
+[package]
+name = "ferment-engine-retrieval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+default = []
+coreml = ["ferment-engine-infer/coreml"]
+coreai = ["ferment-engine-infer/coreai"]
+ort = ["ferment-engine-infer/ort"]
+
+[dependencies]
+ferment-engine-core.workspace = true
+ferment-engine-audio.workspace = true
+ferment-engine-infer.workspace = true
+serde.workspace = true
+sha2.workspace = true
+sentencepiece-rs = "=0.2.2"
+tokenizers = { version = "=0.23.2", default-features = false, features = ["fancy-regex"] }
+
+[dev-dependencies]
+async-trait.workspace = true
+ferment-engine-models.workspace = true
+ferment-engine-test-fixtures.workspace = true
+futures-executor = "0.3"
+serde_json.workspace = true

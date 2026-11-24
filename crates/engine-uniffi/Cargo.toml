@@ -1,0 +1,66 @@
+[package]
+name = "ferment-engine-uniffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "ferment_engine_uniffi"
+crate-type = ["cdylib", "staticlib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/uniffi-bindgen.rs"
+
+[features]
+cli = ["uniffi/cli"]
+
+[lints.rust]
+# UniFFI's scaffolding is `#[unsafe(no_mangle)] extern "C"` by construction, so
+# the workspace's `unsafe_code = "deny"` cannot apply to the one crate whose
+# whole job is the FFI boundary. `engine-media` carries the same exception for
+# its CoreMedia/VideoToolbox bindings.
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[dependencies]
+# The engine, ort-only. The workspace entry for `ferment-engine-infer` is
+# `default-features = false`, so `features = ["ort"]` resolves to ort alone —
+# no CoreML, which does not exist off Apple.
+# The decoded-audio contract (`AudioFrames`) the two transcribers and the
+# speaker encoder take directly — the crate has no path-taking impl for those
+# three, so the façade decodes with `AudioSource` and hands the frames over.
+ferment-engine-audio.workspace = true
+ferment-engine-core.workspace = true
+ferment-engine-infer = { workspace = true, features = ["ort"] }
+ferment-engine-models.workspace = true
+ferment-engine-media.workspace = true
+ferment-engine-processors = { path = "../engine-processors", default-features = false, features = ["ort"] }
+# The smoke decodes its compiled-in reference frame and drives an async
+# capability from a synchronous FFI call — the same two crates
+# `engine-processors` already uses for both jobs.
+futures-executor = "0.3"
+image.workspace = true
+serde_json.workspace = true
+# Same version `ort` itself dlopens with. Used only to PROBE the runtime before
+# handing its path to `ort` — see engine_init's doc comment.
+libloading = "0.9"
+ort.workspace = true
+thiserror.workspace = true
+uniffi = { version = "=0.31.1" }
+
+[dev-dependencies]
+async-trait.workspace = true
+ferment-engine-test-fixtures.workspace = true
+
+# This crate's test binary links libav through engine-processors, so it obeys
+# the rule ffmpeg-rpath's own doc comment states: every crate producing a
+# binary that links libav emits the dev-time rpath from its own build.rs. On
+# Android the emitted `-Wl,-rpath` is inert — the loader takes libraries from
+# the APK's lib/arm64-v8a — and it is left in place rather than cfg'd away.
+[build-dependencies]
+ferment-ffmpeg-rpath.workspace = true
